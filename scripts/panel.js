@@ -126,11 +126,13 @@ geotab.addin.workingHours = function () {
         }).then(function () {
             setBusy(true, 'Leyendo identificaciones y viajes…');
             var fromIso = S.iso(S.dayStart(from)), toIso = S.iso(Math.min(S.dayEnd(to), Date.now()));
+            // viajes desde el día anterior: el último viaje previo dice desde dónde salió el vehículo (casa u oficina)
+            var tripsFromIso = S.iso(S.dayStart(S.addDays(from, -1)));
             return Promise.all([
                 multiCall([
                     ['Get', { typeName: 'DriverChange', search: { fromDate: fromIso, toDate: toIso } }],
                     ['Get', {
-                        typeName: 'Trip', search: { fromDate: fromIso, toDate: toIso },
+                        typeName: 'Trip', search: { fromDate: tripsFromIso, toDate: toIso },
                         propertySelector: { fields: ['id', 'device', 'driver', 'start', 'stop', 'stopDuration', 'stopPoint', 'nextTripStart', 'drivingDuration', 'distance'], isIncluded: true }
                     }]
                 ]),
@@ -318,7 +320,7 @@ geotab.addin.workingHours = function () {
     }
 
     function exportJornadas() {
-        var rows = [['Fecha', 'Vehículo', 'Chofer', 'Acompañantes', 'Salida', 'Regreso', 'Horas fuera de oficina', 'Paradas sin cliente', 'Estado']];
+        var rows = [['Fecha', 'Vehículo', 'Chofer', 'Acompañantes', 'Inicio', 'Fin', 'Horas fuera de oficina', 'Paradas sin cliente', 'Estado']];
         jornadaRows().forEach(function (it) {
             var tl = it.timeline;
             rows.push([it.jornada.date, dName(it.jornada.deviceId), uName(it.jornada.driverId), crewText(it),
@@ -368,8 +370,14 @@ geotab.addin.workingHours = function () {
         var tl = it.timeline;
         var html = '<div class="wh-form">';
         html += '<p class="wh-muted">Identificación: ' + S.hhmm(it.jornada.firstAt)
-            + (tl.firstStart != null ? ' · Salida ' + S.hhmm(tl.firstStart) + ' · Regreso ' + S.hhmm(tl.lastStop)
+            + (tl.firstStart != null ? ' · Inicio ' + S.hhmm(tl.firstStart) + ' · Fin ' + S.hhmm(tl.lastStop)
                 + ' · Fuera de oficina ' + S.fmtDuration(S.total(tl.outside)) : ' · sin viajes registrados') + '</p>';
+        if (tl.commuteIn || tl.commuteOut) {
+            html += '<p class="wh-muted">No se cuentan los viajes desde/hacia el domicilio: '
+                + [tl.commuteIn ? 'ida ' + S.hhmm(tl.commuteIn.from) + '–' + S.hhmm(tl.commuteIn.to) : '',
+                    tl.commuteOut ? 'vuelta ' + S.hhmm(tl.commuteOut.from) + '–' + S.hhmm(tl.commuteOut.to) : '']
+                    .filter(Boolean).join(' · ') + '.</p>';
+        }
 
         html += '<h3>Acompañantes</h3>';
         html += '<label class="wh-check"><input type="checkbox" id="wh-m-solo"' + (draft.solo ? ' checked' : '') + '> Viajó solo</label>';
@@ -390,7 +398,9 @@ geotab.addin.workingHours = function () {
             ask.forEach(function (s, i) {
                 var e = S.stopEntry(draft, s.tripId);
                 var val = e && e.clients && e.clients[0] || '';
-                html += '<tr><td>' + S.hhmm(s.from) + '–' + S.hhmm(s.to) + '</td><td>' + S.fmtDuration(s.duration) + '</td>'
+                html += '<tr><td>' + S.hhmm(s.from) + '–' + S.hhmm(s.to)
+                    + (s.moves ? ' <span class="wh-muted" title="Movimientos cortos dentro del mismo predio">(+' + s.moves + ' mov.)</span>' : '')
+                    + '</td><td>' + S.fmtDuration(s.duration) + '</td>'
                     + '<td>' + esc(s.zone ? s.zone.name : '—') + '</td>'
                     + '<td><input type="text" list="wh-client-list" data-s-client="' + i + '" value="' + esc(val) + '" placeholder="' + esc(s.zone ? s.zone.name : 'Cliente') + '"></td>'
                     + '<td class="wh-center"><input type="checkbox" data-s-none="' + i + '"' + (e && e.noClient ? ' checked' : '') + '></td></tr>';
@@ -579,7 +589,16 @@ geotab.addin.workingHours = function () {
             }).join('') + '</div></div>'
             + '<div class="wh-card"><h3>Paradas y avisos</h3>'
             + '<label class="wh-field">Parada mínima a informar (minutos) <input type="number" id="wh-s-minstop" min="1" max="240" value="' + esc(settings.minStopMinutes) + '"></label>'
-            + '<label class="wh-field">Revisión en Drive cada (minutos) <input type="number" id="wh-s-poll" min="1" max="30" value="' + esc(settings.pollMinutes) + '"></label></div>'
+            + '<label class="wh-field">Revisión en Drive cada (minutos) <input type="number" id="wh-s-poll" min="1" max="30" value="' + esc(settings.pollMinutes) + '"></label>'
+            + '<p class="wh-muted">Movimientos dentro del predio: se toman como la misma visita los movimientos de hasta estos metros y minutos, o dentro de la misma geocerca.</p>'
+            + '<label class="wh-field">Distancia máxima (metros) <input type="number" id="wh-s-shortm" min="0" max="10000" step="100" value="' + esc(settings.shortMoveMeters) + '"></label>'
+            + '<label class="wh-field">Duración máxima (minutos) <input type="number" id="wh-s-shortmin" min="0" max="60" value="' + esc(settings.shortMoveMinutes) + '"></label></div>'
+            + '<div class="wh-card"><h3>Viajes desde y hacia el domicilio</h3>'
+            + '<p class="wh-muted">Cuando el operario sale de su casa o vuelve a ella con el vehículo (lugar que no es una zona base).</p>'
+            + '<label class="wh-check"><input type="radio" name="wh-commute" value="exclude"' + (settings.commute !== 'include' ? ' checked' : '') + '> '
+            + 'No cuentan: la jornada empieza al llegar al primer destino y termina al salir de la última parada de trabajo</label>'
+            + '<label class="wh-check"><input type="radio" name="wh-commute" value="include"' + (settings.commute === 'include' ? ' checked' : '') + '> '
+            + 'Cuentan: desde que sale de su casa hasta que llega</label></div>'
             + '<div class="wh-card"><h3>Clientes sin geocerca</h3><p class="wh-muted">Uno por línea. Aparecen como opciones en Drive.</p>'
             + '<textarea id="wh-s-clients" rows="8">' + esc((settings.clients || []).join('\n')) + '</textarea></div>'
             + '</div><div class="wh-form-actions"><span class="wh-muted">' + (settings._id ? '' : 'Todavía no se guardó ninguna configuración (se usan los valores por defecto).') + '</span>'
@@ -605,6 +624,11 @@ geotab.addin.workingHours = function () {
         s.clientZoneTypeIds = checkedValues('data-ztype');
         s.minStopMinutes = Math.max(1, parseInt($('#wh-s-minstop').value, 10) || 10);
         s.pollMinutes = Math.max(1, parseInt($('#wh-s-poll').value, 10) || 2);
+        var sm = parseInt($('#wh-s-shortm').value, 10), smin = parseInt($('#wh-s-shortmin').value, 10);
+        s.shortMoveMeters = isNaN(sm) ? S.DEFAULT_SETTINGS.shortMoveMeters : Math.max(0, sm);
+        s.shortMoveMinutes = isNaN(smin) ? S.DEFAULT_SETTINGS.shortMoveMinutes : Math.max(0, smin);
+        var commute = root.querySelector('input[name="wh-commute"]:checked');
+        s.commute = commute ? commute.value : 'exclude';
         s.clients = ($('#wh-s-clients').value || '').split(/\r?\n/).map(function (c) { return c.trim(); })
             .filter(function (c, i, arr) { return c && arr.indexOf(c) === i; });
         $('#wh-s-save').disabled = true;
@@ -707,7 +731,7 @@ geotab.addin.workingHours = function () {
                 bound = true;
                 var to = S.dayKey(Date.now());
                 $('#wh-to').value = to;
-                $('#wh-from').value = S.addDays(to, -6);
+                $('#wh-from').value = to;       // por defecto: hoy
             }
             var done = false;
             function finish() { if (!done) { done = true; callback(); } }

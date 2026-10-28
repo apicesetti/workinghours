@@ -21,10 +21,13 @@ AddInData (tripulación y clientes) ───┘   ◄── Drive (chofer) / My
 |---|---|
 | **Identificación** | Cualquier `DriverChange` de una persona (`DriverKey`, `TripDriver`, …). `UnknownDriverId` se genera al apagar el vehículo y **no corta** la jornada. |
 | **Jornada** | Chofer + vehículo + día local. Se corta si otra persona, o una llave de un grupo excluido (mantenimiento), se identifica en el vehículo. |
-| **Horas fuera de oficina** | Desde el inicio del primer viaje hasta el fin del último, **menos las paradas intermedias dentro de una zona base**. |
+| **Horas fuera de oficina** | Desde el inicio de la jornada hasta el fin, **menos las paradas intermedias dentro de una zona base**. |
+| **Viajes desde/hacia el domicilio** | Por defecto **no cuentan**. Si el vehículo durmió fuera de la base (el último viaje previo terminó en la casa), la jornada empieza al llegar al primer destino. Si el último viaje del día termina fuera de la base, la jornada termina al salir de la última parada de trabajo. Configurable para que cuenten. |
+| **Cierre de jornada** | **No hace falta marcarlo**: el fin sale de los viajes. "Cerrar jornada" en Drive es opcional y solo sirve para dejar la tripulación confirmada. |
 | **Acompañantes** | Heredan la línea de tiempo del vehículo entre su hora de subida y de bajada. En la primera carga se cuentan desde la identificación; si se suman después, desde ese momento. |
 | **Dos vehículos el mismo día** | Los intervalos de una persona se **unen**, no se suman: nunca se duplican horas. |
-| **Paradas** | Las de más de N minutos (configurable, 10 por defecto) fuera de la base. Si caen en una geocerca se sugiere como cliente; si no, el chofer elige del catálogo o escribe uno. |
+| **Paradas** | Cada viaje termina en una parada en su **destino** (`stopPoint`), que dura hasta el próximo viaje. Cuentan las de más de N minutos (configurable, 10 por defecto) fuera de la base. Si caen en una geocerca se sugiere como cliente; si no, el chofer elige del catálogo o escribe uno. |
+| **Movimientos dentro del predio** | Las paradas consecutivas unidas por un movimiento corto (≤ 1000 m y ≤ 10 min, configurable) o dentro de la misma geocerca se toman como **una sola visita**, desde que llegó hasta que se fue del predio. |
 
 ## Archivos
 
@@ -45,8 +48,8 @@ AddInData (tripulación y clientes) ───┘   ◄── Drive (chofer) / My
 3. **Configurar desde la página** (pestaña *Configuración*, primero consultar un período):
    - **Operarios**: `Conductores` (incluye *Tecnicos de campo* y *Otros*).
    - **Grupos excluidos**: `Llaves de mantenimiento` y `Llaves sin asignar`.
-   - **Zonas base**: la zona de la oficina/taller. **En intcesetti no encontré ninguna zona de oficina**: hay que crearla o elegir la existente.
-   - **Tipos de zona de cliente**: vacío = cualquier zona que no sea base. Conviene restringirlo, porque intcesetti tiene 537 zonas y muchas no son clientes.
+   - **Zonas base**: la oficina de Buenos Aires 444. En intcesetti hay tres zonas sobre el mismo rectángulo; marcar las tres (buscar "Buenos Aires 4"): `Buenos Aires 444, Neuquén, Argentina` (dos, `b339B` y `b339D`) y `Buenos Aires 464, Q8300 Neuquén, Argentina` (`b33A8`).
+   - **Tipos de zona de cliente**: vacío = cualquier zona que no sea base. **Conviene restringirlo**: intcesetti tiene 537 zonas, incluidas áreas grandes como "Ciudad - Neuquen 1/6" o "Ruta 22 Neuquén". Sin restringir, una parada en cualquier lugar de la ciudad se sugeriría como cliente.
    - **Clientes sin geocerca**: catálogo para elegir en Drive.
 4. **Permisos de los choferes**. El perfil de seguridad con el que entran a Drive necesita poder **ver**:
    - *Cambios de conductor* (`DriverChange`) y *Viajes* (`Trip`),
@@ -63,7 +66,7 @@ AddInData (tripulación y clientes) ───┘   ◄── Drive (chofer) / My
 | `type` | Uno por | Campos de `rec` |
 |---|---|---|
 | `crew` | jornada | `key` (`AAAA-MM-DD\|deviceId\|driverId`), `deviceId`, `driverId`, `identifiedAt`, `solo`, `members[]` (`userId`, `name`, `from`, `to`), `stops[]` (`tripId`, `from`, `to`, `zoneId`, `clients[]`, `noClient`), `status`, `closedAt/By`, `source` (drive/panel), `history[]` |
-| `settings` | base | `operatorGroupIds`, `excludeGroupIds`, `baseZoneIds`, `clientZoneTypeIds`, `minStopMinutes`, `pollMinutes`, `clients[]` |
+| `settings` | base | `operatorGroupIds`, `excludeGroupIds`, `baseZoneIds`, `clientZoneTypeIds`, `minStopMinutes`, `shortMoveMeters`, `shortMoveMinutes`, `commute` (exclude/include), `pollMinutes`, `clients[]` |
 
 Cada registro respeta el límite de 10.000 caracteres: se recorta el historial si hace falta.
 
@@ -81,7 +84,7 @@ Todo lo que carga el chofer se guarda primero en el teléfono y se sincroniza cu
 ## Tests
 
 ```bash
-TZ=America/Argentina/Buenos_Aires node --test tests/*.test.js   # lógica (12 tests)
+TZ=America/Argentina/Buenos_Aires node --test tests/*.test.js   # lógica (15 tests)
 cd tests/e2e && python3 run_drive.py && python3 run_panel.py && python3 run_sync_error.py   # navegador (requiere playwright)
 ```
 

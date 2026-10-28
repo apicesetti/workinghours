@@ -42,6 +42,9 @@
         baseZoneIds: [],           // zonas que cuentan como oficina/base
         clientZoneTypeIds: [],     // vacío = cualquier zona que no sea base se propone como cliente
         minStopMinutes: 10,        // paradas más cortas no se piden ni se cuentan como visita
+        shortMoveMeters: 1000,     // un movimiento de hasta esta distancia…
+        shortMoveMinutes: 10,      // …y de hasta estos minutos se toma como dentro del mismo predio
+        commute: 'exclude',        // 'exclude': no cuentan los viajes desde/hacia el domicilio · 'include': cuentan
         pollMinutes: 2,            // cada cuánto revisa el add-in de Drive si hubo una identificación
         clients: []                // catálogo de clientes sin geocerca
     };
@@ -361,51 +364,125 @@
     // ------------------------------------------------------------------
     // Línea de tiempo de una jornada
     // ------------------------------------------------------------------
+    /** Distancia en metros entre dos puntos {x: lon, y: lat}. */
+    function distanceMeters(a, b) {
+        if (!a || !b) { return Infinity; }
+        var R = 6371000, rad = Math.PI / 180;
+        var dLat = (b.y - a.y) * rad, dLon = (b.x - a.x) * rad;
+        var h = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+            + Math.cos(a.y * rad) * Math.cos(b.y * rad) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+    }
+
+    /**
+     * ¿El viaje "t", que sale de la parada "from" y llega a "to", es un movimiento dentro del
+     * mismo predio? Sí cuando las dos paradas están en la misma geocerca, o cuando el viaje es
+     * corto en distancia y en tiempo.
+     */
+    function isShortMove(t, from, to, settings) {
+        if (from.base !== to.base) { return false; }
+        if (from.zone && to.zone && from.zone.id === to.zone.id) { return true; }
+        var maxM = settings.shortMoveMeters != null ? settings.shortMoveMeters : DEFAULT_SETTINGS.shortMoveMeters;
+        var maxMs = (settings.shortMoveMinutes != null ? settings.shortMoveMinutes : DEFAULT_SETTINGS.shortMoveMinutes) * MIN;
+        if (!maxM || !maxMs) { return false; }
+        // Trip.distance viene en km; si falta se usa la distancia en línea recta entre paradas
+        var meters = t.distance != null ? t.distance * 1000 : distanceMeters(from.point, to.point);
+        return meters <= maxM && (toMs(t.stop) - toMs(t.start)) <= maxMs;
+    }
+
     /**
      * @param jornada  de buildJornadas
-     * @param trips    Trip[] del vehículo (se filtran los que empiezan dentro de la jornada)
+     * @param trips    Trip[] del vehículo. Se usan los que empiezan dentro de la jornada y, para saber
+     *                 desde dónde salió, el último viaje anterior (conviene incluir el día previo).
      * @param ctx      { zones: zonas compactas, settings }
      * @returns {
-     *   trips, firstStart, lastStop,
+     *   trips, firstStart, lastStop,               inicio y fin de la jornada de trabajo
      *   outside:[intervalos fuera de la base], driving:[intervalos manejando],
-     *   stops:[{ tripId, from, to, duration, point, base, zone, final }]
+     *   stops:[{ tripId, tripIds, moves, from, to, duration, point, base, zone, final }],
+     *   commuteIn, commuteOut                      viajes desde/hacia el domicilio no contados ({from,to} o null)
      * }
+     *
+     * Paradas: cada Trip termina en una parada (stopPoint = destino) que dura hasta el próximo viaje.
+     * Las paradas consecutivas unidas por movimientos cortos se fusionan en una sola visita.
      */
     function buildTimeline(jornada, trips, ctx) {
         ctx = ctx || {};
         var settings = ctx.settings || DEFAULT_SETTINGS;
         var zones = ctx.zones || [];
         var minStop = (settings.minStopMinutes || 0) * MIN;
-        var list = (trips || []).filter(function (t) {
-            return idOf(t.device) === jornada.deviceId && inSegments(toMs(t.start), jornada.segments);
-        }).sort(function (a, b) { return toMs(a.start) - toMs(b.start); });
+        var deviceTrips = (trips || []).filter(function (t) { return idOf(t.device) === jornada.deviceId; })
+            .sort(function (a, b) { return toMs(a.start) - toMs(b.start); });
+        var list = deviceTrips.filter(function (t) { return inSegments(toMs(t.start), jornada.segments); });
 
-        var res = { trips: list, firstStart: null, lastStop: null, outside: [], driving: [], stops: [] };
+        var res = { trips: list, firstStart: null, lastStop: null, outside: [], driving: [], stops: [], commuteIn: null, commuteOut: null };
         if (!list.length) { return res; }
 
         var segEnd = jornada.segments.reduce(function (m, s) { return Math.max(m, s.to); }, 0);
-        res.firstStart = toMs(list[0].start);
-        res.lastStop = toMs(list[list.length - 1].stop);
 
-        var baseHoles = [];
-        list.forEach(function (t, i) {
-            var start = toMs(t.start), stop = toMs(t.stop);
-            if (stop > start) { res.driving.push({ from: start, to: stop }); }
+        // 1) una parada por viaje (destino del viaje)
+        var raw = list.map(function (t, i) {
+            var stop = toMs(t.stop);
             var isLast = i === list.length - 1;
             var nextStart = isLast ? toMs(t.nextTripStart) : toMs(list[i + 1].start);
             var to = nextStart != null ? nextStart : stop + parseTimeSpan(t.stopDuration);
             if (isLast) { to = Math.min(to, segEnd); }
             var cls = classifyPoint(t.stopPoint, zones, settings);
-            var stopRec = {
-                tripId: t.id, from: stop, to: Math.max(stop, to), duration: Math.max(0, to - stop),
+            return {
+                tripId: t.id, arriveStart: toMs(t.start), from: stop, to: Math.max(stop, to),
                 point: t.stopPoint ? { x: t.stopPoint.x, y: t.stopPoint.y } : null,
                 base: cls.base, zone: cls.zone, final: isLast
             };
-            if (!isLast && cls.base) { baseHoles.push({ from: stopRec.from, to: stopRec.to }); }
-            if (stopRec.duration >= minStop) { res.stops.push(stopRec); }
         });
-        res.outside = subtract([{ from: res.firstStart, to: res.lastStop }], baseHoles);
-        res.driving = union(res.driving);
+
+        // 2) se fusionan las paradas unidas por movimientos cortos (dentro del predio)
+        var groups = [];
+        raw.forEach(function (s, i) {
+            var g = groups[groups.length - 1];
+            if (g && isShortMove(list[i], raw[i - 1], s, settings)) {
+                g.to = s.to;
+                g.final = s.final;
+                g.tripIds.push(s.tripId);
+                g.moves++;
+                if (!g.zone && s.zone) { g.zone = s.zone; }
+                return;
+            }
+            groups.push({
+                tripId: s.tripId, tripIds: [s.tripId], moves: 0, arriveStart: s.arriveStart,
+                from: s.from, to: s.to, point: s.point, base: s.base, zone: s.zone, final: s.final
+            });
+        });
+        groups.forEach(function (g) { g.duration = Math.max(0, g.to - g.from); });
+
+        // 3) inicio y fin; los viajes desde/hacia el domicilio se descuentan si así se configuró
+        var start = toMs(list[0].start);
+        var end = toMs(list[list.length - 1].stop);
+        if (settings.commute !== 'include') {
+            var prev = deviceTrips.filter(function (t) { return toMs(t.start) < start; }).pop();
+            var origin = prev && prev.stopPoint ? classifyPoint(prev.stopPoint, zones, settings) : null;
+            var firstGroup = groups[0], lastGroup = groups[groups.length - 1];
+            // salió de un lugar que no es la base (su casa): la jornada empieza al llegar al primer destino,
+            // sea un cliente o la oficina
+            if (origin && !origin.base && groups.length > 1) {
+                res.commuteIn = { from: start, to: firstGroup.from };
+                start = firstGroup.from;
+            }
+            if (lastGroup.final && !lastGroup.base && groups.length > 1) {
+                res.commuteOut = { from: lastGroup.arriveStart, to: lastGroup.from };
+                end = Math.max(start, lastGroup.arriveStart);
+            }
+        }
+        res.firstStart = start;
+        res.lastStop = end;
+
+        var baseHoles = [];
+        groups.forEach(function (g) {
+            if (!g.final && g.base) { baseHoles.push({ from: g.from, to: g.to }); }
+            if (g.duration >= minStop) { res.stops.push(g); }
+        });
+        res.outside = subtract([{ from: start, to: end }], baseHoles);
+        res.driving = clip(union(list.map(function (t) {
+            return { from: toMs(t.start), to: toMs(t.stop) };
+        })), start, end);
         return res;
     }
 
@@ -717,6 +794,7 @@
         buildJornadas: buildJornadas, inSegments: inSegments,
         compactZone: compactZone, pointInPolygon: pointInPolygon, zonesAt: zonesAt, classifyPoint: classifyPoint,
         union: union, clip: clip, subtract: subtract, total: total,
+        distanceMeters: distanceMeters, isShortMove: isShortMove,
         buildTimeline: buildTimeline, stopsToAsk: stopsToAsk,
         newCrewRecord: newCrewRecord, addHistory: addHistory, activeMembers: activeMembers, hasCrew: hasCrew,
         stopEntry: stopEntry, wrap: wrap, unwrap: unwrap, strip: strip, fitSize: fitSize, dedupe: dedupe,

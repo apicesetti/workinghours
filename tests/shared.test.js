@@ -236,3 +236,75 @@ test('Store: si el registro se borró en el servidor, save lo recrea en vez de q
     assert.equal(saved._id, 'aNuevo');
     assert.equal(db.length, 1);
 });
+
+// ---------------- Movimientos dentro del predio y viajes desde/hacia el domicilio ----------------
+// Oficina real de intcesetti: "Buenos Aires 444, Neuquén" (b339B)
+const OFICINA = { id: 'b339B', name: 'Buenos Aires 444, Neuquén, Argentina', zoneTypes: ['ZoneTypeVendorServiceCenterId'], points: [
+    { x: -68.05851745605469, y: -38.94969940185547 }, { x: -68.05671691894531, y: -38.94969940185547 },
+    { x: -68.05671691894531, y: -38.95090103149414 }, { x: -68.05851745605469, y: -38.95090103149414 }] };
+const zonas2 = [S.compactZone(OFICINA), S.compactZone(sq('zYac', 'Yacimiento Loma Campana', -68.6, -38.3, 0.03, [{ id: 'b6' }]))];
+const conf2 = Object.assign({}, S.DEFAULT_SETTINGS, { baseZoneIds: ['b339B'], minStopMinutes: 10 });
+const CASA = { x: -68.10, y: -38.96 };
+const T = (h, m) => Date.UTC(2026, 9, 20, h + 3, m);  // hora local de Argentina (UTC-3)
+const trip = (id, h1, m1, h2, m2, pt, km) => ({ id, device: { id: 'v' }, start: new Date(T(h1, m1)).toISOString(),
+    stop: new Date(T(h2, m2)).toISOString(), stopPoint: pt, distance: km });
+const jornadaV = { key: '2026-10-20|v|A', date: '2026-10-20', deviceId: 'v', driverId: 'A', segments: [{ from: T(6, 0), to: T(23, 0) }] };
+
+test('movimientos cortos dentro del predio del cliente se fusionan en una sola visita', () => {
+    const pozo1 = { x: -66.90, y: -39.10 }, pozo2 = { x: -66.903, y: -39.101 }, pozo3 = { x: -66.905, y: -39.102 };
+    const trips = [
+        trip('a', 7, 30, 8, 0, { x: -68.0578, y: -38.9504 }, 3),       // de casa a la oficina
+        trip('b', 8, 30, 9, 30, pozo1, 60),                            // a la locación
+        trip('c', 10, 0, 10, 4, pozo2, 0.4),                           // 400 m, 4 min → mismo predio
+        trip('d', 10, 30, 10, 33, pozo3, 0.3),                         // 300 m, 3 min → mismo predio
+        trip('e', 12, 0, 13, 0, { x: -68.0578, y: -38.9504 }, 60),     // vuelve a la oficina
+        trip('f', 18, 0, 18, 20, CASA, 5)                              // a casa
+    ];
+    const tl = S.buildTimeline(jornadaV, trips, { zones: zonas2, settings: conf2 });
+    const visita = tl.stops.filter(s => !s.base && !s.final);
+    assert.equal(visita.length, 1, 'una sola visita en vez de tres paradas');
+    assert.deepEqual(visita[0].tripIds, ['b', 'c', 'd']);
+    assert.equal(visita[0].moves, 2);
+    assert.equal(visita[0].from, T(9, 30));
+    assert.equal(visita[0].to, T(12, 0), 'desde que llegó hasta que se fue del predio');
+    // movimiento largo: no se fusiona
+    const largo = trips.map(t => t.id === 'c' ? Object.assign({}, t, { distance: 4 }) : t);
+    assert.equal(S.buildTimeline(jornadaV, largo, { zones: zonas2, settings: conf2 }).stops.filter(s => !s.base && !s.final).length, 2);
+    // dentro de la misma geocerca se fusiona aunque el movimiento sea largo
+    const enYac = [trip('y1', 8, 0, 9, 0, { x: -68.62, y: -38.31 }, 50), trip('y2', 10, 0, 10, 25, { x: -68.58, y: -38.29 }, 3.5),
+        trip('y3', 12, 0, 13, 0, { x: -68.0578, y: -38.9504 }, 50)];
+    const tlY = S.buildTimeline(jornadaV, enYac, { zones: zonas2, settings: conf2 });
+    assert.equal(tlY.stops.filter(s => !s.base && !s.final).length, 1);
+    assert.equal(tlY.stops[0].zone.name, 'Yacimiento Loma Campana');
+});
+
+test('viajes desde y hacia el domicilio: no cuentan por defecto, configurable', () => {
+    const ayer = { id: 'z', device: { id: 'v' }, start: new Date(T(-6, 0)).toISOString(), stop: new Date(T(-5, 40)).toISOString(), stopPoint: CASA };
+    const trips = [ayer,
+        trip('a', 7, 30, 8, 0, { x: -66.9, y: -39.1 }, 40),            // de casa directo al cliente
+        trip('b', 12, 0, 13, 0, { x: -68.0578, y: -38.9504 }, 40),     // a la oficina
+        trip('c', 17, 0, 17, 20, CASA, 5)];                            // de la oficina a casa
+    const tl = S.buildTimeline(jornadaV, trips, { zones: zonas2, settings: conf2 });
+    assert.equal(tl.firstStart, T(8, 0), 'empieza al llegar al primer destino');
+    assert.equal(tl.lastStop, T(17, 0), 'termina al salir de la última parada de trabajo');
+    assert.deepEqual(tl.commuteIn, { from: T(7, 30), to: T(8, 0) });
+    assert.deepEqual(tl.commuteOut, { from: T(17, 0), to: T(17, 20) });
+    // 08:00–17:00 menos la oficina 13:00–17:00 = 5 h
+    assert.equal(S.total(tl.outside), 5 * H);
+    assert.equal(S.total(tl.driving), H, 'el manejo a/desde casa tampoco cuenta (solo 12:00–13:00)');
+    const incl = S.buildTimeline(jornadaV, trips, { zones: zonas2, settings: Object.assign({}, conf2, { commute: 'include' }) });
+    assert.equal(incl.firstStart, T(7, 30));
+    assert.equal(incl.lastStop, T(17, 20));
+    // si el vehículo durmió en la oficina, el primer viaje cuenta
+    const desdeOficina = [Object.assign({}, ayer, { stopPoint: { x: -68.0578, y: -38.9504 } })].concat(trips.slice(1));
+    assert.equal(S.buildTimeline(jornadaV, desdeOficina, { zones: zonas2, settings: conf2 }).firstStart, T(7, 30));
+    // sin datos del día anterior no se sabe de dónde salió: cuenta
+    assert.equal(S.buildTimeline(jornadaV, trips.slice(1), { zones: zonas2, settings: conf2 }).firstStart, T(7, 30));
+});
+
+test('los acompañantes que el chofer deja en su casa no suman el viaje de vuelta', () => {
+    const trips = [trip('a', 8, 0, 9, 0, { x: -66.9, y: -39.1 }, 40), trip('b', 15, 0, 16, 0, CASA, 45)];
+    const tl = S.buildTimeline(jornadaV, trips, { zones: zonas2, settings: conf2 });
+    const sum = S.summarize([{ jornada: jornadaV, timeline: tl, rec: { members: [{ userId: 'B', from: null, to: null }] } }]);
+    assert.equal(sum['B|2026-10-20'].outside, 7 * H, '08:00–15:00, sin el viaje a casa');
+});

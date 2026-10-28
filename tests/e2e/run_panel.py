@@ -46,6 +46,7 @@ with sync_playwright() as p:
     })""")
     page.wait_for_selector('#wh-hours tr')
     page.wait_for_timeout(300)
+    check(page.input_value('#wh-from') == page.input_value('#wh-to'), 'el rango por defecto es hoy')
 
     # --- Horas
     rows = {r.split('\t')[0].strip('▸ ').strip(): r.split('\t') for r in page.locator('#wh-hours tr').all_inner_texts()}
@@ -111,12 +112,17 @@ with sync_playwright() as p:
     page.wait_for_timeout(100)
     check(page.locator('[data-base-zone=zNip]').count() == 1, 'el buscador de zonas encuentra Nippon')
     page.fill('#wh-s-minstop', '15')
+    check(page.is_checked('input[name=wh-commute][value=exclude]'), 'por defecto no cuentan los viajes desde/hacia el domicilio')
+    page.check('input[name=wh-commute][value=include]')
+    page.fill('#wh-s-shortm', '500')
     page.screenshot(path=str(OUT / 'panel_5_config.png'), full_page=True)
     page.click('#wh-s-save')
     page.wait_for_timeout(300)
     st = page.evaluate("window.__db.AddInData.filter(e => e.details.type === 'settings')")
     check(len(st) == 1 and st[0]['details']['rec']['minStopMinutes'] == 15, 'configuración actualizada sin duplicar')
     check(st[0]['details']['rec']['baseZoneIds'] == ['zBase'], 'la zona base se conserva al guardar')
+    check(st[0]['details']['rec']['commute'] == 'include' and st[0]['details']['rec']['shortMoveMeters'] == 500,
+          'se guardan el criterio de domicilio y la distancia de movimientos cortos')
     b.close()
 
 print()

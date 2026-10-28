@@ -464,7 +464,8 @@ geotab.addin.workingHoursDrive = function () {
         // DriverChange de todo el vehículo para cortar la jornada si otra persona lo usó
         return Promise.all([loadZones(), multiCall([
             ['Get', { typeName: 'DriverChange', search: { deviceSearch: { id: j.deviceId }, fromDate: S.iso(from), toDate: S.iso(to) } }],
-            ['Get', { typeName: 'Trip', search: { deviceSearch: { id: j.deviceId }, fromDate: S.iso(from), toDate: S.iso(to) } }]
+            // desde el día anterior: el último viaje previo indica si salió de su casa o de la oficina
+            ['Get', { typeName: 'Trip', search: { deviceSearch: { id: j.deviceId }, fromDate: S.iso(S.dayStart(S.addDays(j.date, -1))), toDate: S.iso(to) } }]
         ])]).then(function (r) {
             var res = r[1];
             // cualquier otra persona (o llave de mantenimiento) que se identificó corta mi tramo
@@ -512,6 +513,7 @@ geotab.addin.workingHoursDrive = function () {
             var isOther = cur && cur !== '__none' && !opts.some(function (o) { return o.v === cur; });
             return '<div class="whd-stop' + (e ? ' is-done' : '') + '" data-trip="' + esc(s.tripId) + '">'
                 + '<div class="whd-stop-time"><b>' + S.hhmm(s.from) + ' – ' + S.hhmm(s.to) + '</b><span>' + S.fmtDuration(s.duration) + (e ? ' · confirmada' : '') + '</span></div>'
+                + (s.moves ? '<p class="whd-hint">Incluye ' + s.moves + (s.moves === 1 ? ' movimiento' : ' movimientos') + ' dentro del mismo predio.</p>' : '')
                 + '<select class="whd-input" data-stop-sel="' + i + '">'
                 + '<option value="">Elegí el cliente…</option>'
                 + opts.map(function (o) { return '<option value="' + esc(o.v) + '"' + (o.v === cur ? ' selected' : '') + '>' + esc(o.l) + '</option>'; }).join('')
