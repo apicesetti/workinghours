@@ -39,7 +39,9 @@
 .whd-sub { margin: 2px 0 0; color: var(--whd-muted); font-size: 14px; }
 .whd-icon { width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--whd-line); background: var(--whd-card); color: var(--whd-accent); font-size: 22px; cursor: pointer; }
 
-.whd-sync { background: var(--whd-warn-bg); color: var(--whd-warn-fg); border-radius: 8px; padding: 8px 12px; font-size: 14px; margin-bottom: 10px; }
+.whd-sync { background: var(--whd-warn-bg); color: var(--whd-warn-fg); border-radius: 8px; padding: 8px 12px; font-size: 14px; margin-bottom: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.whd-sync span { flex: 1; }
+.whd-sync-err { flex-basis: 100%; order: 3; font-size: 13px; word-break: break-word; opacity: .9; }
 .whd-msg { border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; font-size: 15px; }
 .whd-msg-ok { background: var(--whd-ok-bg); color: var(--whd-ok-fg); }
 .whd-msg-info { background: var(--whd-card); border: 1px solid var(--whd-line); }

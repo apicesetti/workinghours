@@ -60,10 +60,15 @@ geotab.addin.workingHoursDrive = function () {
     function $(sel) { return root && root.querySelector(sel); }
     function by() { return me ? me.login : ''; }
 
+    /** Texto legible de un error del API de Geotab (varía según la versión de Drive). */
     function errText(e) {
         if (!e) { return 'Error desconocido'; }
         if (typeof e === 'string') { return e; }
-        return e.message || (e.errors && e.errors[0] && e.errors[0].message) || e.name || 'Error';
+        var inner = (e.errors && e.errors[0]) || (e.error && e.error.errors && e.error.errors[0]) || e.error || {};
+        var name = inner.name || e.name || (e.data && e.data.type) || '';
+        var msg = inner.message || e.message || '';
+        if (!msg) { try { msg = JSON.stringify(e).slice(0, 200); } catch (x) { msg = String(e); } }
+        return (name && msg.indexOf(name) < 0 ? name + ': ' : '') + msg;
     }
 
     function showMsg(text, kind) {
@@ -215,15 +220,24 @@ geotab.addin.workingHoursDrive = function () {
     function flush() {
         if (!isOnline()) { return Promise.resolve(); }
         var keys = Object.keys(records).filter(function (k) { return records[k] && records[k]._dirty; });
+        var lastError = null;
         return keys.reduce(function (p, k) {
             return p.then(function () {
                 return store.save(records[k]).then(function (saved) {
                     // si hubo otra edición local mientras se guardaba, se vuelve a marcar
                     if (records[k] && records[k].updatedAt !== saved.updatedAt) { records[k]._id = saved._id; return; }
                     records[k] = saved;
-                }).catch(function () { /* queda pendiente */ });
+                }).catch(function (e) {
+                    // queda pendiente; se guarda el motivo para mostrarlo
+                    lastError = { at: Date.now(), text: errText(e) };
+                    try { console.error('Horas de trabajo: no se pudo sincronizar', k, e); } catch (x) { /* sin consola */ }
+                });
             });
-        }, Promise.resolve()).then(function () { saveRecordsLocal(); renderSync(); });
+        }, Promise.resolve()).then(function () {
+            lsSet('syncError', pendingSync() ? lastError : null);
+            saveRecordsLocal();
+            renderSync();
+        });
     }
 
     function saveLocal(rec, action, detail) {
@@ -233,8 +247,10 @@ geotab.addin.workingHoursDrive = function () {
         saveRecordsLocal();
         renderSync();
         return flush().then(function () {
-            showMsg(records[rec.key] && records[rec.key]._dirty
-                ? 'Guardado en el teléfono. Se sincroniza cuando haya señal.' : 'Guardado.', 'ok');
+            var pending = records[rec.key] && records[rec.key]._dirty;
+            if (!pending) { showMsg('Guardado.', 'ok'); }
+            else if (!isOnline()) { showMsg('Guardado en el teléfono. Se sincroniza cuando haya señal.', 'ok'); }
+            else { showMsg('Guardado en el teléfono, pero MyGeotab lo rechazó. Mirá el motivo arriba.', 'error'); }
         });
     }
 
@@ -308,7 +324,10 @@ geotab.addin.workingHoursDrive = function () {
         var parts = [];
         if (!isOnline()) { parts.push('Sin conexión'); }
         if (n) { parts.push(n === 1 ? '1 cambio sin sincronizar' : n + ' cambios sin sincronizar'); }
-        el.textContent = parts.join(' · ');
+        var err = n && isOnline() ? lsGet('syncError', null) : null;
+        el.innerHTML = '<span>' + esc(parts.join(' · ')) + '</span>'
+            + (err ? '<small class="whd-sync-err">' + esc(S.hhmm(err.at) + ' · ' + err.text) + '</small>' : '')
+            + (n && isOnline() ? '<button class="whd-btn whd-btn-sm whd-btn-ghost" data-act="retry">Reintentar</button>' : '');
         el.hidden = !parts.length;
     }
 
@@ -620,6 +639,14 @@ geotab.addin.workingHoursDrive = function () {
             else if (act === 'solo') { saveSolo(); }
             else if (act === 'drop') { dropMember(b.getAttribute('data-user')); }
             else if (act === 'saveStops') { saveStops(); }
+            else if (act === 'retry') {
+                b.disabled = true;
+                flush().then(function () {
+                    showMsg(pendingSync() ? 'Sigue sin sincronizar: ' + ((lsGet('syncError', null) || {}).text || '') : 'Sincronizado.',
+                        pendingSync() ? 'error' : 'ok');
+                    render();
+                });
+            }
         });
         root.addEventListener('change', function (e) {
             var pick = e.target.getAttribute('data-pick');

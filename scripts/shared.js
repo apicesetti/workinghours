@@ -660,7 +660,10 @@
     Store.prototype.save = function (rec) {
         var self = this;
         fitSize(rec);
-        var findId = rec._id ? Promise.resolve(rec._id) : self.byKey(rec.key).then(function (r) { return r ? r._id : null; });
+        // si la búsqueda previa falla se crea igual: un duplicado se resuelve con dedupe(),
+        // un registro trabado en el teléfono no se resuelve nunca
+        var findId = rec._id ? Promise.resolve(rec._id)
+            : self.byKey(rec.key).then(function (r) { return r ? r._id : null; }, function () { return null; });
         function add() {
             return self.call('Add', { typeName: 'AddInData', entity: { addInId: ADDIN_ID, details: wrap(strip(rec)) } });
         }

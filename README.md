@@ -82,7 +82,7 @@ Todo lo que carga el chofer se guarda primero en el teléfono y se sincroniza cu
 
 ```bash
 TZ=America/Argentina/Buenos_Aires node --test tests/*.test.js   # lógica (12 tests)
-cd tests/e2e && python3 run_drive.py && python3 run_panel.py    # navegador (requiere playwright)
+cd tests/e2e && python3 run_drive.py && python3 run_panel.py && python3 run_sync_error.py   # navegador (requiere playwright)
 ```
 
 Los tests de lógica usan identificaciones reales de intcesetti del 28/10/2026, por ejemplo una llave de mantenimiento que corta la jornada de Canales en WP.
