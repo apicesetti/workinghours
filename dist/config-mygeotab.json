@@ -1,0 +1,16 @@
+{
+  "name": "Horas de trabajo",
+  "supportEmail": "soporte@cesetti.com.ar",
+  "version": "1.0.0",
+  "items": [
+    {
+      "url": "https://apicesetti.github.io/workinghours/workingHours.html",
+      "path": "ActivityLink/",
+      "menuName": {
+        "es": "Horas de trabajo",
+        "en": "Working hours"
+      },
+      "svgIcon": "https://apicesetti.github.io/workinghours/images/icon.svg"
+    }
+  ]
+}

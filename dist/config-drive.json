@@ -1,0 +1,18 @@
+{
+  "name": "Horas de trabajo (Drive)",
+  "supportEmail": "soporte@cesetti.com.ar",
+  "version": "1.0.0",
+  "items": [
+    {
+      "url": "https://apicesetti.github.io/workinghours/workingHoursDrive.html",
+      "path": "DriveAppLink/",
+      "menuName": {
+        "es": "Horas de trabajo",
+        "en": "Working hours"
+      },
+      "svgIcon": "https://apicesetti.github.io/workinghours/images/icon.svg"
+    }
+  ],
+  "onStartup": true,
+  "onShutdown": true
+}

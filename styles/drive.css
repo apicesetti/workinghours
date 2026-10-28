@@ -1,0 +1,87 @@
+#whDrive {
+    --whd-bg: #f4f6f8;
+    --whd-card: #ffffff;
+    --whd-fg: #1f2933;
+    --whd-muted: #66727f;
+    --whd-line: #dde3e9;
+    --whd-accent: #25477b;
+    --whd-accent-2: #1b365e;
+    --whd-warn-bg: #fff3dc;
+    --whd-warn-fg: #8a5300;
+    --whd-ok-bg: #e5f4ea;
+    --whd-ok-fg: #1e6b38;
+    --whd-err-bg: #fdecea;
+    --whd-err-fg: #a12218;
+    font-family: "Roboto", "Segoe UI", Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.4;
+    color: var(--whd-fg);
+    background: var(--whd-bg);
+    min-height: 100%;
+    padding: 12px 14px 32px;
+    box-sizing: border-box;
+}
+@media (prefers-color-scheme: dark) {
+    #whDrive {
+        --whd-bg: #15191e; --whd-card: #1f252c; --whd-fg: #e8ecf0; --whd-muted: #9aa6b2; --whd-line: #333c46;
+        --whd-accent: #7aa7e6; --whd-accent-2: #9cbdf0;
+        --whd-warn-bg: #3d2f12; --whd-warn-fg: #f3c56b; --whd-ok-bg: #173323; --whd-ok-fg: #8fd6a8;
+        --whd-err-bg: #3e1a17; --whd-err-fg: #f2a59c;
+    }
+}
+#whDrive *, #whDrive *::before, #whDrive *::after { box-sizing: inherit; }
+#whDrive [hidden] { display: none !important; }
+#whDrive.is-busy .whd-icon { animation: whd-spin 1s linear infinite; }
+@keyframes whd-spin { to { transform: rotate(360deg); } }
+
+.whd-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; }
+.whd-head h1 { font-size: 21px; font-weight: 500; margin: 0; }
+.whd-sub { margin: 2px 0 0; color: var(--whd-muted); font-size: 14px; }
+.whd-icon { width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--whd-line); background: var(--whd-card); color: var(--whd-accent); font-size: 22px; cursor: pointer; }
+
+.whd-sync { background: var(--whd-warn-bg); color: var(--whd-warn-fg); border-radius: 8px; padding: 8px 12px; font-size: 14px; margin-bottom: 10px; }
+.whd-msg { border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; font-size: 15px; }
+.whd-msg-ok { background: var(--whd-ok-bg); color: var(--whd-ok-fg); }
+.whd-msg-info { background: var(--whd-card); border: 1px solid var(--whd-line); }
+.whd-msg-error { background: var(--whd-err-bg); color: var(--whd-err-fg); }
+
+.whd-card { background: var(--whd-card); border: 1px solid var(--whd-line); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+.whd-card.is-closed { opacity: .7; }
+.whd-card h2 { font-size: 18px; margin: 0; font-weight: 500; }
+.whd-crew { margin: 10px 0 12px; }
+.whd-pill { display: inline-block; padding: 5px 10px; border-radius: 999px; background: var(--whd-bg); font-size: 14px; }
+.whd-pill-warn { background: var(--whd-warn-bg); color: var(--whd-warn-fg); font-weight: 500; }
+.whd-pill-ok { background: var(--whd-ok-bg); color: var(--whd-ok-fg); }
+.whd-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.whd-btn { font: inherit; font-size: 15px; min-height: 44px; padding: 8px 16px; border-radius: 8px; border: 1px solid var(--whd-accent); background: var(--whd-accent); color: #fff; cursor: pointer; }
+.whd-btn:disabled { opacity: .45; cursor: not-allowed; }
+.whd-btn-ghost { background: transparent; color: var(--whd-accent); }
+.whd-btn-sm { min-height: 36px; padding: 4px 12px; font-size: 14px; }
+@media (prefers-color-scheme: dark) { .whd-btn:not(.whd-btn-ghost) { color: #10161d; } }
+
+.whd-back { font: inherit; background: none; border: 0; color: var(--whd-accent); padding: 8px 0; cursor: pointer; font-size: 15px; }
+.whd-title { font-size: 19px; font-weight: 500; margin: 4px 0 0; }
+#whDrive h3 { font-size: 15px; font-weight: 500; color: var(--whd-muted); text-transform: uppercase; letter-spacing: .03em; margin: 18px 0 6px; }
+.whd-hint { color: var(--whd-muted); font-size: 14px; margin: 4px 0 10px; }
+.whd-empty { background: var(--whd-card); border: 1px dashed var(--whd-line); border-radius: 12px; padding: 18px; color: var(--whd-muted); }
+.whd-empty b { color: var(--whd-fg); }
+
+.whd-input { font: inherit; width: 100%; min-height: 44px; padding: 8px 12px; border: 1px solid var(--whd-line); border-radius: 8px; background: var(--whd-card); color: inherit; margin-bottom: 8px; }
+
+.whd-list { list-style: none; margin: 0; padding: 0; background: var(--whd-card); border: 1px solid var(--whd-line); border-radius: 12px; overflow: hidden; }
+.whd-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--whd-line); }
+.whd-list li:last-child { border-bottom: 0; }
+.whd-list small { display: block; color: var(--whd-muted); font-size: 13px; }
+.whd-pick li { padding: 0; }
+.whd-check { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 52px; padding: 8px 12px; cursor: pointer; }
+.whd-check.is-on { background: var(--whd-ok-bg); }
+.whd-check input { width: 22px; height: 22px; accent-color: var(--whd-accent); flex: none; }
+
+.whd-bar { position: sticky; bottom: 0; display: flex; gap: 8px; padding: 12px 0 4px; background: linear-gradient(to top, var(--whd-bg) 70%, transparent); }
+.whd-bar .whd-btn { flex: 1; }
+
+.whd-stop { background: var(--whd-card); border: 1px solid var(--whd-line); border-left: 4px solid var(--whd-warn-fg); border-radius: 10px; padding: 12px; margin-bottom: 10px; }
+.whd-stop.is-done { border-left-color: var(--whd-ok-fg); }
+.whd-stop-time { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 15px; }
+.whd-stop-time span { color: var(--whd-muted); font-size: 14px; }

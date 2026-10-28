@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Horas de trabajo</title>
+    <link rel="stylesheet" href="styles/panel.css">
+    <script src="scripts/shared.js"></script>
+    <script src="scripts/panel.js"></script>
+</head>
+<body>
+<div id="workingHours" class="wh">
+    <header class="wh-header">
+        <div>
+            <h1>Horas de trabajo</h1>
+            <p class="wh-sub">Horas fuera de la oficina por operario, tripulaciones y clientes visitados</p>
+        </div>
+        <nav class="wh-tabs" role="tablist">
+            <button class="wh-tab is-active" data-tab="hours" role="tab">Horas</button>
+            <button class="wh-tab" data-tab="jornadas" role="tab">Jornadas</button>
+            <button class="wh-tab" data-tab="clients" role="tab">Clientes</button>
+            <button class="wh-tab" data-tab="settings" role="tab">Configuración</button>
+        </nav>
+    </header>
+
+    <div class="wh-toolbar wh-range">
+        <label class="wh-lbl">Desde <input id="wh-from" type="date"></label>
+        <label class="wh-lbl">Hasta <input id="wh-to" type="date"></label>
+        <button id="wh-load" class="wh-btn">Consultar</button>
+        <span class="wh-spacer"></span>
+        <span id="wh-status" class="wh-muted"></span>
+    </div>
+
+    <div id="wh-msg" class="wh-msg" hidden></div>
+
+    <!-- ============ HORAS ============ -->
+    <section id="wh-tab-hours" class="wh-panel">
+        <div class="wh-toolbar">
+            <input id="wh-h-filter" type="search" placeholder="Buscar operario o legajo…" autocomplete="off">
+            <span class="wh-spacer"></span>
+            <button id="wh-h-export" class="wh-btn wh-btn-ghost">Exportar CSV</button>
+        </div>
+        <div class="wh-kpis" id="wh-kpis"></div>
+        <div class="wh-table-wrap">
+            <table class="wh-table">
+                <thead>
+                <tr>
+                    <th>Operario</th>
+                    <th>Legajo</th>
+                    <th class="wh-num">Días</th>
+                    <th class="wh-num" title="Desde el inicio del primer viaje hasta el fin del último, sin las paradas en la base">Fuera de oficina</th>
+                    <th class="wh-num">Manejando</th>
+                    <th class="wh-num">Acompañando</th>
+                    <th class="wh-num">En clientes</th>
+                    <th class="wh-num" title="Jornadas en las que participó sin tripulación cargada">Sin cargar</th>
+                </tr>
+                </thead>
+                <tbody id="wh-hours"></tbody>
+            </table>
+        </div>
+        <p id="wh-hours-empty" class="wh-empty" hidden>Sin horas para el período elegido.</p>
+        <p class="wh-foot">Tocá un operario para ver el detalle por día. Las horas de quien estuvo en dos vehículos el mismo día no se duplican.</p>
+    </section>
+
+    <!-- ============ JORNADAS ============ -->
+    <section id="wh-tab-jornadas" class="wh-panel" hidden>
+        <div class="wh-toolbar">
+            <input id="wh-j-filter" type="search" placeholder="Vehículo, chofer o acompañante…" autocomplete="off">
+            <select id="wh-j-state">
+                <option value="all">Todas</option>
+                <option value="pending">Sin tripulación cargada</option>
+                <option value="loaded">Con tripulación</option>
+                <option value="stops">Con paradas sin cliente</option>
+            </select>
+            <span class="wh-spacer"></span>
+            <button id="wh-j-export" class="wh-btn wh-btn-ghost">Exportar CSV</button>
+        </div>
+        <div class="wh-table-wrap">
+            <table class="wh-table">
+                <thead>
+                <tr>
+                    <th>Fecha</th>
+                    <th>Vehículo</th>
+                    <th>Chofer</th>
+                    <th>Acompañantes</th>
+                    <th>Salida</th>
+                    <th>Regreso</th>
+                    <th class="wh-num">Fuera de oficina</th>
+                    <th class="wh-num">Paradas sin cliente</th>
+                    <th>Estado</th>
+                    <th class="wh-col-actions"></th>
+                </tr>
+                </thead>
+                <tbody id="wh-jornadas"></tbody>
+            </table>
+        </div>
+        <p id="wh-jornadas-empty" class="wh-empty" hidden>No hay jornadas para mostrar.</p>
+        <p class="wh-foot" id="wh-jornadas-count"></p>
+    </section>
+
+    <!-- ============ CLIENTES ============ -->
+    <section id="wh-tab-clients" class="wh-panel" hidden>
+        <div class="wh-toolbar">
+            <input id="wh-c-filter" type="search" placeholder="Cliente, vehículo u operario…" autocomplete="off">
+            <select id="wh-c-source">
+                <option value="all">Todas las visitas</option>
+                <option value="confirmed">Confirmadas por el chofer</option>
+                <option value="zone">Solo por geocerca</option>
+            </select>
+            <span class="wh-spacer"></span>
+            <button id="wh-c-export" class="wh-btn wh-btn-ghost">Exportar CSV</button>
+        </div>
+        <h2 class="wh-h2">Resumen por cliente</h2>
+        <div class="wh-table-wrap">
+            <table class="wh-table">
+                <thead>
+                <tr>
+                    <th>Cliente</th>
+                    <th class="wh-num">Visitas</th>
+                    <th class="wh-num">Tiempo en el cliente</th>
+                    <th class="wh-num" title="Tiempo en el cliente multiplicado por las personas presentes">Horas-persona</th>
+                    <th>Última visita</th>
+                </tr>
+                </thead>
+                <tbody id="wh-client-sum"></tbody>
+            </table>
+        </div>
+        <h2 class="wh-h2">Visitas</h2>
+        <div class="wh-table-wrap">
+            <table class="wh-table">
+                <thead>
+                <tr>
+                    <th>Fecha</th>
+                    <th>Cliente</th>
+                    <th>Vehículo</th>
+                    <th>Desde</th>
+                    <th>Hasta</th>
+                    <th class="wh-num">Duración</th>
+                    <th>Personas</th>
+                    <th>Origen</th>
+                </tr>
+                </thead>
+                <tbody id="wh-visits"></tbody>
+            </table>
+        </div>
+        <p id="wh-visits-empty" class="wh-empty" hidden>Sin visitas a clientes en el período.</p>
+    </section>
+
+    <!-- ============ CONFIGURACIÓN ============ -->
+    <section id="wh-tab-settings" class="wh-panel" hidden>
+        <div id="wh-settings"></div>
+    </section>
+
+    <!-- ============ MODAL ============ -->
+    <div id="wh-modal" class="wh-modal" hidden>
+        <div class="wh-modal-box" role="dialog" aria-modal="true" aria-labelledby="wh-modal-title">
+            <header class="wh-modal-head">
+                <h2 id="wh-modal-title"></h2>
+                <button class="wh-modal-close" data-close aria-label="Cerrar">×</button>
+            </header>
+            <div id="wh-modal-body"></div>
+        </div>
+    </div>
+
+    <datalist id="wh-client-list"></datalist>
+</div>
+</body>
+</html>
