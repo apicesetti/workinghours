@@ -1,6 +1,10 @@
 """Prueba de punta a punta del add-in de Drive con el API simulado."""
 import json, pathlib, sys
 from playwright.sync_api import sync_playwright
+import datetime
+
+AR = datetime.timezone(datetime.timedelta(hours=-3))
+FIXED_NOW = datetime.datetime.now(AR).replace(hour=18, minute=30, second=0, microsecond=0)
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 HERE = pathlib.Path(__file__).parent
@@ -20,6 +24,7 @@ with sync_playwright() as p:
     page.on('pageerror', lambda e: errors.append('pageerror: %s' % e))
     page.on('console', lambda m: m.type == 'error' and errors.append('console: %s' % m.text))
     page.on('dialog', lambda d: d.accept())
+    page.clock.set_fixed_time(FIXED_NOW)
     page.add_init_script(path=str(HERE / 'mockapi.js'))
     page.goto((REPO / 'workingHoursDrive.html').as_uri())
 
@@ -125,14 +130,51 @@ with sync_playwright() as p:
     check(dropped['to'] is not None, 'al volver la señal se sincroniza la bajada')
     check(page.is_hidden('#whd-sync'), 'sin pendientes después de sincronizar')
 
-    # 6) cerrar jornada
-    page.click('[data-act=close]')
+    # 6) planilla del día: se completa sola con odómetro ajustado, el conductor la confirma
+    check(page.locator('[data-act=close]').count() == 0, 'ya no hace falta cerrar la jornada')
+    page.click('[data-act=sheet]')
+    page.wait_for_selector('.whd-sheet')
+    sheet = page.inner_text('.whd-sheet')
+    print('      planilla:', sheet.replace('\n', ' | '))
+    check('225.500,0 km' in sheet and '225.580,0 km' in sheet, 'odómetro inicial y final (ajustado)')
+    check('Km recorridos\n80,0 km' in sheet, 'km recorridos = final - inicial')
+    check('Km entre clientes\n20,0 km' in sheet, 'km entre clientes = viaje de Batería 8 a YPF Loma Campana')
+    check('Salida\n08:31' in sheet and 'Llegada\n12:10' in sheet, 'hora de salida y de llegada')
+    check('Cristian Vargas' in sheet and 'Braian Coñequeo' in sheet, 'acompañantes con horario')
+    visits = page.locator('.whd-list li').all_inner_texts()
+    check(len(visits) == 2 and 'YPF Loma Campana' in visits[1], 'visitas a clientes con horario')
+    check(not [c for c in page.locator('.whd-hint').all_inner_texts() if 'tomado de los viajes' in c], 'usa el odómetro ajustado')
+    page.fill('#whd-notes', 'Sin novedades')
+    page.screenshot(path=str(OUT / 'drive_5_planilla.png'), full_page=True)
+    page.click('[data-act=confirmSheet]')
     page.wait_for_timeout(400)
     rec = page.evaluate('window.__db.AddInData[0].details.rec')
-    check(rec['status'] == 'closed' and rec['closedBy'] == 'mf@cesetti.com.ar', 'jornada cerrada con usuario')
-    check(all(m['to'] for m in rec['members']), 'al cerrar se baja a todos')
-    check(len(rec['history']) >= 4, 'historial registrado (%d entradas)' % len(rec['history']))
-    page.screenshot(path=str(OUT / 'drive_5_closed.png'), full_page=True)
+    pl = rec.get('planilla') or {}
+    check(pl.get('confirmedBy') == 'mf@cesetti.com.ar' and pl.get('notes') == 'Sin novedades', 'planilla confirmada con usuario y observaciones')
+    check(pl.get('snapshot', {}).get('km') == 80 and pl['snapshot']['vehiculos'][0][0] == 'OE · AD229OE', 'queda la copia de lo confirmado')
+    check(page.is_disabled('[data-act=confirmSheet]'), 'botón deshabilitado una vez confirmada')
+    # si después cambia un cliente, pide reconfirmar
+    page.click('[data-act=home]')
+    check('Planilla confirmada' in page.inner_text('.whd-card'), 'la tarjeta muestra la planilla confirmada')
+    page.click('[data-act=stops]')
+    page.wait_for_selector('.whd-stop')
+    page.select_option('[data-stop-sel="1"]', '__other')
+    page.fill('[data-stop-other="1"]', 'YPF Rincón del Mangrullo')
+    page.click('[data-act=saveStops]')
+    page.wait_for_timeout(300)
+    page.click('[data-act=home]')
+    page.click('[data-act=sheet]')
+    page.wait_for_selector('.whd-sheet')
+    check('cambió desde que la confirmaste' in page.inner_text('#whd-view'), 'avisa que la planilla cambió')
+    check(page.is_enabled('[data-act=confirmSheet]'), 'permite reconfirmar')
+    # sin permiso a StatusData usa el odómetro de los viajes
+    page.evaluate('window.__denyStatusData = true')
+    page.click('[data-act=home]')
+    page.click('[data-act=sheet]')
+    page.wait_for_selector('.whd-sheet')
+    page.wait_for_timeout(300)
+    check(any('tomado de los viajes' in c for c in page.locator('.whd-hint').all_inner_texts()), 'sin odómetro ajustado avisa que usa el de los viajes')
+    check('225.580,0 km' in page.inner_text('.whd-sheet'), 'y el valor sigue disponible')
 
     # 7) getSession nunca recibe una función como 2.º parámetro (se lanzaría error)
     check(not [e for e in errors if 'MethodNotSupported' in e], 'getSession con firma correcta')

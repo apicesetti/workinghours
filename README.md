@@ -1,9 +1,10 @@
-# Horas de trabajo — Add-ins Geotab Drive + MyGeotab · v1.0
+# Horas de trabajo — Add-ins Geotab Drive + MyGeotab · v1.1
 
 Seguimiento de las **horas fuera de la oficina de todos los operarios**, aunque no manejen, y de los **clientes visitados** en cada parada.
 
 - **Drive** — cuando el chofer se identifica en un vehículo (llavero NFC o GO Focus), el teléfono le avisa para que cargue quién viaja con él. Durante la jornada marca quién se bajó y asigna el cliente de cada parada.
 - **MyGeotab** — el supervisor ve las horas por operario, las jornadas sin tripulación cargada y las visitas por cliente. Puede completar o corregir desde la oficina y exportar a CSV.
+- **Planilla diaria** — reemplaza la planilla en papel: odómetro inicial y final, km totales, km entre clientes, visitas (desde–hasta), acompañantes, hora de salida y de llegada. Se completa sola; el conductor la revisa y la **confirma** en Drive, y la oficina la ve, la exporta o la imprime.
 
 No usa servidor propio: todo sale de `DriverChange` + `Trip` + `Zone` y se guarda en **AddInData**.
 
@@ -11,23 +12,38 @@ No usa servidor propio: todo sale de `DriverChange` + `Trip` + `Zone` y se guard
 
 ```
 Llavero / GO Focus ──► DriverChange ──┐
-                                      ├──► Jornada (chofer + vehículo + día) ──► horas por persona
+                                      ├──► Jornada (conductor + día) ──► horas por persona y planilla
 Trip (viajes y paradas) ──────────────┤
 Zone (base y clientes) ───────────────┤
+StatusData (odómetro ajustado) ───────┤
 AddInData (tripulación y clientes) ───┘   ◄── Drive (chofer) / MyGeotab (oficina)
 ```
 
 | Concepto | Regla |
 |---|---|
 | **Identificación** | Cualquier `DriverChange` de una persona (`DriverKey`, `TripDriver`, …). `UnknownDriverId` se genera al apagar el vehículo y **no corta** la jornada. |
-| **Jornada** | Chofer + vehículo + día local. Se corta si otra persona, o una llave de un grupo excluido (mantenimiento), se identifica en el vehículo. |
+| **Jornada** | **Conductor + día local**, con todos los vehículos que manejó ese día. En cada vehículo, su tramo se corta si otra persona, o una llave de un grupo excluido (mantenimiento), se identifica en él. |
 | **Horas fuera de oficina** | Desde el inicio de la jornada hasta el fin, **menos las paradas intermedias dentro de una zona base**. |
 | **Viajes desde/hacia el domicilio** | Por defecto **no cuentan**. Si el vehículo durmió fuera de la base (el último viaje previo terminó en la casa), la jornada empieza al llegar al primer destino. Si el último viaje del día termina fuera de la base, la jornada termina al salir de la última parada de trabajo. Configurable para que cuenten. |
-| **Cierre de jornada** | **No hace falta marcarlo**: el fin sale de los viajes. "Cerrar jornada" en Drive es opcional y solo sirve para dejar la tripulación confirmada. |
+| **Cierre de jornada** | **No hace falta marcarlo**: el fin sale de los viajes. Lo que el conductor confirma es la planilla. |
 | **Acompañantes** | Heredan la línea de tiempo del vehículo entre su hora de subida y de bajada. En la primera carga se cuentan desde la identificación; si se suman después, desde ese momento. |
-| **Dos vehículos el mismo día** | Los intervalos de una persona se **unen**, no se suman: nunca se duplican horas. |
+| **Varias jornadas el mismo día** | Si una persona acompañó a dos conductores, sus intervalos se **unen**, no se suman: nunca se duplican horas. |
 | **Paradas** | Cada viaje termina en una parada en su **destino** (`stopPoint`), que dura hasta el próximo viaje. Cuentan las de más de N minutos (configurable, 10 por defecto) fuera de la base. Si caen en una geocerca se sugiere como cliente; si no, el chofer elige del catálogo o escribe uno. |
 | **Movimientos dentro del predio** | Las paradas consecutivas unidas por un movimiento corto (≤ 1000 m y ≤ 10 min, configurable) o dentro de la misma geocerca se toman como **una sola visita**, desde que llegó hasta que se fue del predio. |
+
+## Planilla diaria
+
+| Dato de la planilla | De dónde sale |
+|---|---|
+| **Odómetro inicial / final** | Odómetro **ajustado** de MyGeotab (`DiagnosticOdometerAdjustmentId`), el mismo que usa el add-in **Odómetro por día** ([ODOMETER_REPORT](https://github.com/apicesetti/ODOMETER_REPORT)), leído en el instante de salida y al final del último viaje de cada vehículo. Así los dos add-ins dan los mismos números. Si no se puede leer, se usa el odómetro de los viajes y se marca con `*`. |
+| **Km recorridos totales** | Odómetro final − inicial (por vehículo, sumados). |
+| **Km entre clientes** | Viajes que salen de la visita a un cliente y llegan a la de otro. No cuenta oficina → primer cliente ni último cliente → oficina/casa. |
+| **Visitas (desde – hasta)** | Paradas con cliente (cargado por el conductor o por geocerca), con los movimientos dentro del predio agrupados. |
+| **Acompañantes** | Los cargados en Drive, con hora de subida y bajada. |
+| **Hora de salida** | Inicio del primer viaje con movimiento (≥ 100 m), y desde dónde: oficina, geocerca o domicilio/otro lugar. |
+| **Hora de llegada** | Llegada a la última parada (las maniobras posteriores en el mismo lugar no cuentan), y a dónde: oficina o domicilio/otro lugar. |
+
+En Drive, **Planilla** muestra todo armado; el conductor agrega observaciones y toca **Confirmar planilla**. Queda guardada una copia de lo confirmado (quién y cuándo), útil como registro para ISO 9001. Si después cambia algo (por ejemplo, un cliente), la planilla avisa que hay que reconfirmar. En MyGeotab, la pestaña **Planillas** muestra el estado (pendiente / confirmada / cambió después), exporta a CSV (una fila por vehículo) e imprime una hoja por planilla.
 
 ## Archivos
 
@@ -65,7 +81,7 @@ AddInData (tripulación y clientes) ───┘   ◄── Drive (chofer) / My
 
 | `type` | Uno por | Campos de `rec` |
 |---|---|---|
-| `crew` | jornada | `key` (`AAAA-MM-DD\|deviceId\|driverId`), `deviceId`, `driverId`, `identifiedAt`, `solo`, `members[]` (`userId`, `name`, `from`, `to`), `stops[]` (`tripId`, `from`, `to`, `zoneId`, `clients[]`, `noClient`), `status`, `closedAt/By`, `source` (drive/panel), `history[]` |
+| `crew` | jornada | `key` (`AAAA-MM-DD\|driverId`; los de v1.0 con `AAAA-MM-DD\|deviceId\|driverId` se leen igual), `deviceId`, `deviceIds[]`, `driverId`, `identifiedAt`, `solo`, `members[]` (`userId`, `name`, `from`, `to`), `stops[]` (`tripId`, `from`, `to`, `zoneId`, `clients[]`, `noClient`), `planilla` (`confirmedAt`, `confirmedBy`, `signature`, `notes`, `snapshot`), `source` (drive/panel), `history[]` |
 | `settings` | base | `operatorGroupIds`, `excludeGroupIds`, `baseZoneIds`, `clientZoneTypeIds`, `minStopMinutes`, `shortMoveMeters`, `shortMoveMinutes`, `commute` (exclude/include), `pollMinutes`, `clients[]` |
 
 Cada registro respeta el límite de 10.000 caracteres: se recorta el historial si hace falta.
@@ -84,14 +100,15 @@ Todo lo que carga el chofer se guarda primero en el teléfono y se sincroniza cu
 ## Tests
 
 ```bash
-TZ=America/Argentina/Buenos_Aires node --test tests/*.test.js   # lógica (15 tests)
+TZ=America/Argentina/Buenos_Aires node --test tests/*.test.js   # lógica (19 tests)
 cd tests/e2e && python3 run_drive.py && python3 run_panel.py && python3 run_sync_error.py   # navegador (requiere playwright)
 ```
 
-Los tests de lógica usan identificaciones reales de intcesetti del 28/10/2026, por ejemplo una llave de mantenimiento que corta la jornada de Canales en WP.
+Los tests de lógica usan datos reales de intcesetti del 28/10/2026: una llave de mantenimiento que corta la jornada de Canales en WP, y los viajes y odómetros de Falcon en OE para la planilla. Los recorridos en navegador fijan el reloj a las 18:30 para no depender de la hora en que se corren.
 
 ## A validar en dispositivos reales
 
 - **Notificación**: que aparezca en Android e iOS (`api.mobile.notification.notify`). En iOS, con la app en segundo plano, puede llegar recién al abrir Drive.
 - **GO Focus**: que el reconocimiento facial genere `DriverChange`. El código acepta cualquier tipo, pero no hay identificaciones por cámara en intcesetti para confirmarlo.
 - **whereClause en AddInData**: probado contra el comportamiento documentado; si falla, el fallback lo cubre.
+- **Permiso a StatusData**: el perfil de los choferes necesita ver datos del motor para leer el odómetro ajustado en Drive; si no, la planilla usa el odómetro de los viajes (avisa en pantalla).

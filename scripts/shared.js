@@ -5,8 +5,11 @@
  *   Identificación  DriverChange de una persona (llavero NFC o GO Focus). Se ignoran
  *                   "UnknownDriverId" (se genera al apagar el vehículo) y las personas de los
  *                   grupos excluidos (p. ej. llaves de mantenimiento): estas cortan el tramo.
- *   Jornada         chofer + vehículo + día local. Puede tener varios tramos si otra persona
- *                   usó el vehículo en el medio. Clave: "AAAA-MM-DD|deviceId|driverId".
+ *   Jornada         CONDUCTOR + día local. Incluye todos los vehículos que manejó ese día; cada
+ *                   vehículo puede tener varios tramos si otra persona lo usó en el medio.
+ *                   Clave: "AAAA-MM-DD|driverId" (en v1.0 era "AAAA-MM-DD|deviceId|driverId").
+ *   Planilla        odómetros (ajustado, como ODOMETER_REPORT), salida, llegada, km, km entre
+ *                   clientes, visitas y acompañantes de una jornada. El conductor la confirma.
  *   Tripulación     registro AddInData (type "crew") con los acompañantes de una jornada y
  *                   los clientes de cada parada.
  *   Horas fuera     desde el inicio del primer viaje hasta el fin del último viaje de la
@@ -27,7 +30,7 @@
     'use strict';
 
     var ADDIN_ID = 'aETg6OS_TD0uqoFHaLelHvg';
-    var VERSION = '1.0.0';
+    var VERSION = '1.1.0';
     var CREW = 'crew';
     var SETTINGS = 'settings';
     var UNKNOWN_DRIVER = 'UnknownDriverId';
@@ -195,16 +198,50 @@
     // Jornadas a partir de DriverChange
     // ------------------------------------------------------------------
     /**
+     * Jornadas por CONDUCTOR y día (puede usar varios vehículos en el día).
+     *
      * @param changes  DriverChange[] (cualquier tipo: DriverKey, TripDriver, …)
      * @param opts     { isExcluded(driverId) → bool, now: ms }
-     * @returns        jornadas ordenadas: { key, date, deviceId, driverId, firstAt, segments:[{from,to}] }
+     * @returns        jornadas ordenadas: {
+     *                   key: "AAAA-MM-DD|driverId", date, driverId,
+     *                   deviceId (primer vehículo), deviceIds:[en orden de uso], firstAt,
+     *                   segments:[{ deviceId, from, to }]   tramos en que manejó cada vehículo
+     *                 }
      *
-     * Por vehículo y día se recorre la secuencia ordenada de identificaciones:
+     * Primero, por vehículo y día, se recorre la secuencia ordenada de identificaciones:
      *   - UnknownDriverId (llavero retirado / contacto apagado) no corta el tramo.
      *   - Otra persona, o una llave excluida, corta el tramo actual.
      *   - El último tramo termina a la medianoche (o "now" si el día es hoy).
+     * Después los tramos se agrupan por conductor y día.
      */
     function buildJornadas(changes, opts) {
+        var tramos = buildVehicleTramos(changes, opts);
+        var byDriver = {};
+        tramos.forEach(function (t) {
+            var key = t.date + '|' + t.driverId;
+            var j = byDriver[key] || (byDriver[key] = {
+                key: key, date: t.date, driverId: t.driverId, deviceId: null, deviceIds: [], firstAt: Infinity, segments: []
+            });
+            t.segments.forEach(function (s) { j.segments.push({ deviceId: t.deviceId, from: s.from, to: s.to }); });
+            j.firstAt = Math.min(j.firstAt, t.firstAt);
+        });
+        return Object.keys(byDriver).map(function (k) {
+            var j = byDriver[k];
+            j.segments.sort(function (a, b) { return a.from - b.from; });
+            j.segments.forEach(function (s) { if (j.deviceIds.indexOf(s.deviceId) < 0) { j.deviceIds.push(s.deviceId); } });
+            j.deviceId = j.deviceIds[0];
+            return j;
+        }).sort(function (a, b) { return a.firstAt - b.firstAt; });
+    }
+
+    /** Clave vieja "AAAA-MM-DD|deviceId|driverId" (v1.0, por vehículo) → "AAAA-MM-DD|driverId". */
+    function normalizeKey(key) {
+        var p = String(key || '').split('|');
+        return p.length === 3 ? p[0] + '|' + p[2] : key;
+    }
+
+    /** Tramos por vehículo, conductor y día (paso intermedio de buildJornadas). */
+    function buildVehicleTramos(changes, opts) {
         opts = opts || {};
         var isExcluded = opts.isExcluded || function () { return false; };
         var now = opts.now || Date.now();
@@ -252,11 +289,18 @@
         }).sort(function (a, b) { return a.firstAt - b.firstAt; });
     }
 
-    function inSegments(t, segments) {
+    /** ¿El instante t (en el vehículo deviceId, si se indica) cae dentro de algún tramo? */
+    function inSegments(t, segments, deviceId) {
         for (var i = 0; i < segments.length; i++) {
-            if (t >= segments[i].from && t < segments[i].to) { return true; }
+            var s = segments[i];
+            if (deviceId && s.deviceId && s.deviceId !== deviceId) { continue; }
+            if (t >= s.from && t < s.to) { return true; }
         }
         return false;
+    }
+
+    function deviceIdsOf(jornada) {
+        return jornada.deviceIds && jornada.deviceIds.length ? jornada.deviceIds : [jornada.deviceId];
     }
 
     // ------------------------------------------------------------------
@@ -390,16 +434,28 @@
         return meters <= maxM && (toMs(t.stop) - toMs(t.start)) <= maxMs;
     }
 
+    var MOVING_KM = 0.1;   // viajes más cortos son encendidos/maniobras: no marcan la salida
+
+    /** Lugar de un punto clasificado para la planilla: oficina, geocerca de cliente u otro (domicilio). */
+    function placeOf(cls) {
+        if (!cls) { return { kind: 'unknown', place: '—' }; }
+        if (cls.base) { return { kind: 'base', place: 'Oficina' }; }
+        if (cls.zone) { return { kind: 'zone', place: cls.zone.name }; }
+        return { kind: 'other', place: 'Domicilio / otro lugar' };
+    }
+
     /**
-     * @param jornada  de buildJornadas
-     * @param trips    Trip[] del vehículo. Se usan los que empiezan dentro de la jornada y, para saber
-     *                 desde dónde salió, el último viaje anterior (conviene incluir el día previo).
+     * @param jornada  de buildJornadas (conductor + día, uno o más vehículos)
+     * @param trips    Trip[] de los vehículos de la jornada. Se usan los que empiezan dentro de sus
+     *                 tramos y, para saber desde dónde salió, el viaje anterior (incluir el día previo).
      * @param ctx      { zones: zonas compactas, settings }
      * @returns {
      *   trips, firstStart, lastStop,               inicio y fin de la jornada de trabajo
      *   outside:[intervalos fuera de la base], driving:[intervalos manejando],
-     *   stops:[{ tripId, tripIds, moves, from, to, duration, point, base, zone, final }],
+     *   stops:[{ tripId, tripIds, moves, deviceId, from, to, duration, point, base, zone, final }],
+     *   groups:[todas las paradas, también las cortas], legs:[viajes entre paradas],
      *   commuteIn, commuteOut                      viajes desde/hacia el domicilio no contados ({from,to} o null)
+     *   sheet: { depart, arrive, vehicles:[{ deviceId, departAt, endAt, odoStart, odoEnd, kmTrips }] }
      * }
      *
      * Paradas: cada Trip termina en una parada (stopPoint = destino) que dura hasta el próximo viaje.
@@ -410,11 +466,21 @@
         var settings = ctx.settings || DEFAULT_SETTINGS;
         var zones = ctx.zones || [];
         var minStop = (settings.minStopMinutes || 0) * MIN;
-        var deviceTrips = (trips || []).filter(function (t) { return idOf(t.device) === jornada.deviceId; })
+        var devs = deviceIdsOf(jornada);
+        var all = (trips || []).filter(function (t) { return devs.indexOf(idOf(t.device)) >= 0; })
             .sort(function (a, b) { return toMs(a.start) - toMs(b.start); });
-        var list = deviceTrips.filter(function (t) { return inSegments(toMs(t.start), jornada.segments); });
+        var list = all.filter(function (t) { return inSegments(toMs(t.start), jornada.segments, idOf(t.device)); });
+        /** Viaje anterior del mismo vehículo (aunque sea de otro conductor o del día previo). */
+        function prevTrip(t) {
+            var dev = idOf(t.device), s = toMs(t.start), out = null;
+            all.forEach(function (x) { if (idOf(x.device) === dev && toMs(x.start) < s) { out = x; } });
+            return out;
+        }
 
-        var res = { trips: list, firstStart: null, lastStop: null, outside: [], driving: [], stops: [], commuteIn: null, commuteOut: null };
+        var res = {
+            trips: list, firstStart: null, lastStop: null, outside: [], driving: [], stops: [], groups: [], legs: [],
+            commuteIn: null, commuteOut: null, sheet: null
+        };
         if (!list.length) { return res; }
 
         var segEnd = jornada.segments.reduce(function (m, s) { return Math.max(m, s.to); }, 0);
@@ -428,14 +494,14 @@
             if (isLast) { to = Math.min(to, segEnd); }
             var cls = classifyPoint(t.stopPoint, zones, settings);
             return {
-                tripId: t.id, arriveStart: toMs(t.start), from: stop, to: Math.max(stop, to),
+                tripId: t.id, deviceId: idOf(t.device), arriveStart: toMs(t.start), from: stop, to: Math.max(stop, to),
                 point: t.stopPoint ? { x: t.stopPoint.x, y: t.stopPoint.y } : null,
                 base: cls.base, zone: cls.zone, final: isLast
             };
         });
 
         // 2) se fusionan las paradas unidas por movimientos cortos (dentro del predio)
-        var groups = [];
+        var groups = [], groupOf = [];
         raw.forEach(function (s, i) {
             var g = groups[groups.length - 1];
             if (g && isShortMove(list[i], raw[i - 1], s, settings)) {
@@ -444,20 +510,63 @@
                 g.tripIds.push(s.tripId);
                 g.moves++;
                 if (!g.zone && s.zone) { g.zone = s.zone; }
+                groupOf.push(groups.length - 1);
                 return;
             }
             groups.push({
-                tripId: s.tripId, tripIds: [s.tripId], moves: 0, arriveStart: s.arriveStart,
+                tripId: s.tripId, tripIds: [s.tripId], moves: 0, deviceId: s.deviceId, arriveStart: s.arriveStart,
                 from: s.from, to: s.to, point: s.point, base: s.base, zone: s.zone, final: s.final
             });
+            groupOf.push(groups.length - 1);
         });
         groups.forEach(function (g) { g.duration = Math.max(0, g.to - g.from); });
+        res.groups = groups;
+        // cada viaje une la parada de la que sale con la parada a la que llega
+        res.legs = list.map(function (t, i) {
+            return {
+                tripId: t.id, deviceId: idOf(t.device), km: t.distance || 0, start: toMs(t.start), stop: toMs(t.stop),
+                from: i > 0 ? groups[groupOf[i - 1]].tripId : null, to: groups[groupOf[i]].tripId,
+                internal: i > 0 && groupOf[i - 1] === groupOf[i]
+            };
+        });
+
+        // datos de la planilla que no dependen de lo cargado por el chofer
+        var moving = list.filter(function (t) { return (t.distance || 0) >= MOVING_KM; });
+        var firstMove = moving[0] || list[0];
+        var before = prevTrip(firstMove);
+        var lastGroup = groups[groups.length - 1];
+        var depart = placeOf(before && before.stopPoint ? classifyPoint(before.stopPoint, zones, settings) : null);
+        depart.at = toMs(firstMove.start);
+        depart.deviceId = idOf(firstMove.device);
+        var arrive = placeOf(lastGroup);
+        arrive.at = lastGroup.from;
+        arrive.deviceId = lastGroup.deviceId;
+        res.sheet = {
+            depart: depart, arrive: arrive,
+            vehicles: devs.map(function (dev) {
+                var vt = list.filter(function (t) { return idOf(t.device) === dev; });
+                if (!vt.length) { return null; }
+                var mv = vt.filter(function (t) { return (t.distance || 0) >= MOVING_KM; });
+                var first = mv[0] || vt[0], last = vt[vt.length - 1], prev = prevTrip(first);
+                var odoStart = null;
+                if (first.odometer != null) {
+                    odoStart = prev && prev.odometer != null && prev.odometer <= first.odometer
+                        ? prev.odometer : first.odometer - (first.distance || 0) * 1000;
+                }
+                return {
+                    deviceId: dev, departAt: toMs(first.start), endAt: toMs(last.stop),
+                    odoStart: odoStart == null ? null : odoStart / 1000,
+                    odoEnd: last.odometer == null ? null : last.odometer / 1000,
+                    kmTrips: vt.reduce(function (s, t) { return s + (t.distance || 0); }, 0)
+                };
+            }).filter(Boolean)
+        };
 
         // 3) inicio y fin; los viajes desde/hacia el domicilio se descuentan si así se configuró
         var start = toMs(list[0].start);
         var end = toMs(list[list.length - 1].stop);
         if (settings.commute !== 'include') {
-            var prev = deviceTrips.filter(function (t) { return toMs(t.start) < start; }).pop();
+            var prev = prevTrip(list[0]);
             var origin = prev && prev.stopPoint ? classifyPoint(prev.stopPoint, zones, settings) : null;
             var firstGroup = groups[0], lastGroup = groups[groups.length - 1];
             // salió de un lugar que no es la base (su casa): la jornada empieza al llegar al primer destino,
@@ -500,7 +609,7 @@
         return {
             type: CREW, version: 1,
             key: jornada.key, date: jornada.date,
-            deviceId: jornada.deviceId, deviceName: info.deviceName || '',
+            deviceId: jornada.deviceId, deviceIds: deviceIdsOf(jornada).slice(), deviceName: info.deviceName || '',
             driverId: jornada.driverId, driverName: info.driverName || '',
             identifiedAt: iso(jornada.firstAt),
             solo: false,
@@ -555,6 +664,7 @@
         if (!rec || !rec.type) { return null; }
         rec = clone(rec);
         rec._id = entity.id;
+        if (rec.key) { rec.key = normalizeKey(rec.key); }   // registros v1.0 (por vehículo)
         return rec;
     }
 
@@ -617,7 +727,7 @@
             if (e && e.noClient) { clients = []; }
             if (!clients.length) { return; }
             out.push({
-                tripId: s.tripId, from: s.from, to: s.to, clients: clients,
+                tripId: s.tripId, deviceId: s.deviceId || null, from: s.from, to: s.to, clients: clients,
                 zoneId: (e && e.zoneId) || (s.zone && s.zone.id) || null,
                 confirmed: !!(e && e.clients && e.clients.length), point: s.point
             });
@@ -630,8 +740,8 @@
      * @param items [{ jornada, timeline, rec }]
      * @returns { "userId|AAAA-MM-DD": { userId, date, outside, driving, riding, client, jornadas:[keys], vehicles:[ids] } }
      *
-     * Si una persona participa en varias jornadas del mismo día (cambió de vehículo) los
-     * intervalos se unen, no se suman: nunca se cuentan dos veces las mismas horas.
+     * Si una persona participa en varias jornadas del mismo día (por ejemplo, acompañó a dos
+     * conductores) los intervalos se unen, no se suman: nunca se cuentan dos veces las mismas horas.
      */
     function summarize(items) {
         var acc = {};
@@ -652,7 +762,7 @@
                 else { a._ride = a._ride.concat(mov); }
                 a._client = a._client.concat(clip(visits, p.from, p.to));
                 if (a.jornadas.indexOf(it.jornada.key) < 0) { a.jornadas.push(it.jornada.key); }
-                if (a.vehicles.indexOf(it.jornada.deviceId) < 0) { a.vehicles.push(it.jornada.deviceId); }
+                deviceIdsOf(it.jornada).forEach(function (d) { if (a.vehicles.indexOf(d) < 0) { a.vehicles.push(d); } });
             });
         });
         Object.keys(acc).forEach(function (k) {
@@ -664,6 +774,135 @@
             delete a._out; delete a._drive; delete a._ride; delete a._client;
         });
         return acc;
+    }
+
+    // ------------------------------------------------------------------
+    // Planilla diaria (reemplaza la planilla en papel y usa el mismo odómetro que ODOMETER_REPORT)
+    // ------------------------------------------------------------------
+    var ODOMETER_DIAGNOSTIC = 'DiagnosticOdometerAdjustmentId';   // odómetro ajustado, el que muestra MyGeotab
+
+    /**
+     * Pedidos de odómetro ajustado: el valor en el instante de salida y de fin de cada vehículo.
+     * Con fromDate = toDate, StatusData devuelve el valor interpolado en ese instante.
+     */
+    function odometerRequests(timeline) {
+        var out = [];
+        ((timeline && timeline.sheet && timeline.sheet.vehicles) || []).forEach(function (v) {
+            out.push({ deviceId: v.deviceId, which: 'start', at: v.departAt });
+            out.push({ deviceId: v.deviceId, which: 'end', at: v.endAt });
+        });
+        return out;
+    }
+
+    function odometerCall(req) {
+        return ['Get', {
+            typeName: 'StatusData',
+            search: {
+                deviceSearch: { id: req.deviceId }, diagnosticSearch: { id: ODOMETER_DIAGNOSTIC },
+                fromDate: iso(req.at), toDate: iso(req.at)
+            }
+        }];
+    }
+
+    /** Resultados de odometerCall → { deviceId: { start: km, end: km } } (metros → km). */
+    function odometerMap(requests, results) {
+        var map = {};
+        (requests || []).forEach(function (r, i) {
+            var list = (results && results[i]) || [];
+            var best = null;
+            list.forEach(function (sd) {
+                if (sd && sd.data != null && (!best || Math.abs(toMs(sd.dateTime) - r.at) < Math.abs(toMs(best.dateTime) - r.at))) { best = sd; }
+            });
+            if (!best) { return; }
+            (map[r.deviceId] = map[r.deviceId] || {})[r.which] = best.data / 1000;
+        });
+        return map;
+    }
+
+    function round1(v) { return v == null ? null : Math.round(v * 10) / 10; }
+
+    /**
+     * Planilla de una jornada (conductor + día).
+     * @param odo  opcional, de odometerMap: odómetro ajustado. Sin él se usa el odómetro de los viajes.
+     * @returns {
+     *   key, date, driverId,
+     *   depart: { at, place, kind, deviceId }, arrive: { at, place, kind, deviceId },
+     *   vehicles: [{ deviceId, odoStart, odoEnd, km, source: 'ajustado'|'viajes' }],
+     *   kmTotal, kmBetweenClients,
+     *   visits: [{ client, from, to, confirmed }], companions: [{ userId, name, from, to }], solo,
+     *   confirmation: rec.planilla | null, changed: bool (cambió desde que el conductor la confirmó)
+     * }
+     */
+    function buildPlanilla(jornada, timeline, rec, odo) {
+        var sheet = timeline && timeline.sheet;
+        if (!sheet) { return null; }
+        var visits = clientVisits(timeline, rec);
+        var isVisit = {};
+        visits.forEach(function (v) { isVisit[v.tripId] = true; });
+        // km entre clientes: viajes que salen de la visita a un cliente y llegan a la visita de otro
+        var kmBetween = (timeline.legs || []).reduce(function (s, l) {
+            return !l.internal && l.from && l.from !== l.to && isVisit[l.from] && isVisit[l.to] ? s + l.km : s;
+        }, 0);
+        var vehicles = sheet.vehicles.map(function (v) {
+            var o = odo && odo[v.deviceId] || {};
+            var adj = o.start != null && o.end != null && o.end >= o.start;
+            var start = adj ? o.start : v.odoStart, end = adj ? o.end : v.odoEnd;
+            return {
+                deviceId: v.deviceId, odoStart: round1(start), odoEnd: round1(end),
+                km: round1(start != null && end != null ? end - start : v.kmTrips),
+                source: adj ? 'ajustado' : 'viajes'
+            };
+        });
+        var p = {
+            key: jornada.key, date: jornada.date, driverId: jornada.driverId,
+            depart: sheet.depart, arrive: sheet.arrive, vehicles: vehicles,
+            kmTotal: round1(vehicles.reduce(function (s, v) { return s + (v.km || 0); }, 0)),
+            kmBetweenClients: round1(kmBetween),
+            visits: visits.map(function (v) { return { client: v.clients.join(', '), from: v.from, to: v.to, confirmed: v.confirmed }; }),
+            companions: ((rec && rec.members) || []).map(function (m) {
+                return { userId: m.userId, name: m.name || m.userId, from: toMs(m.from), to: toMs(m.to) };
+            }),
+            solo: !!(rec && rec.solo),
+            confirmation: (rec && rec.planilla) || null
+        };
+        p.signature = planillaSignature(p);
+        p.changed = !!(p.confirmation && p.confirmation.signature !== p.signature);
+        return p;
+    }
+
+    /** Huella corta de lo que el conductor confirma: si cambia algo, hay que reconfirmar. */
+    function planillaSignature(p) {
+        var min = function (t) { return t == null ? '' : Math.round(t / MIN); };
+        var text = JSON.stringify([
+            min(p.depart.at), p.depart.place, min(p.arrive.at), p.arrive.place,
+            p.vehicles.map(function (v) { return [v.deviceId, v.odoStart, v.odoEnd]; }),
+            p.visits.map(function (v) { return [v.client, min(v.from), min(v.to)]; }),
+            p.companions.map(function (c) { return [c.userId, min(c.from), min(c.to)]; }), p.solo
+        ]);
+        var h = 5381;
+        for (var i = 0; i < text.length; i++) { h = ((h << 5) + h + text.charCodeAt(i)) | 0; }
+        return (h >>> 0).toString(36);
+    }
+
+    /** Lo que queda guardado al confirmar: copia compacta de la planilla (evidencia para ISO 9001). */
+    function planillaConfirmation(p, by, notes, names) {
+        names = names || {};
+        return {
+            confirmedAt: new Date().toISOString(), confirmedBy: by || '', signature: p.signature,
+            notes: String(notes || '').slice(0, 500),
+            snapshot: {
+                salida: [iso(p.depart.at), p.depart.place], llegada: [iso(p.arrive.at), p.arrive.place],
+                vehiculos: p.vehicles.map(function (v) { return [names[v.deviceId] || v.deviceId, v.odoStart, v.odoEnd, v.km]; }),
+                km: p.kmTotal, kmClientes: p.kmBetweenClients,
+                visitas: p.visits.slice(0, 20).map(function (v) { return [v.client.slice(0, 60), iso(v.from), iso(v.to)]; }),
+                acompanantes: p.companions.map(function (c) { return [c.name, iso(c.from), iso(c.to)]; })
+            }
+        };
+    }
+
+    function fmtKm(v) {
+        if (v == null) { return '—'; }
+        return v.toLocaleString('es-AR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
     }
 
     // ------------------------------------------------------------------
@@ -791,7 +1030,11 @@
         dayKey: dayKey, dayStart: dayStart, dayEnd: dayEnd, daysBetween: daysBetween, addDays: addDays,
         hhmm: hhmm, fmtDuration: fmtDuration, hoursDecimal: hoursDecimal, idOf: idOf, userName: userName,
         expandGroups: expandGroups, userInGroups: userInGroups, isActive: isActive, operatorsFrom: operatorsFrom,
-        buildJornadas: buildJornadas, inSegments: inSegments,
+        buildJornadas: buildJornadas, buildVehicleTramos: buildVehicleTramos, normalizeKey: normalizeKey,
+        inSegments: inSegments, deviceIdsOf: deviceIdsOf, placeOf: placeOf,
+        ODOMETER_DIAGNOSTIC: ODOMETER_DIAGNOSTIC, odometerRequests: odometerRequests, odometerCall: odometerCall,
+        odometerMap: odometerMap, buildPlanilla: buildPlanilla, planillaSignature: planillaSignature,
+        planillaConfirmation: planillaConfirmation, fmtKm: fmtKm,
         compactZone: compactZone, pointInPolygon: pointInPolygon, zonesAt: zonesAt, classifyPoint: classifyPoint,
         union: union, clip: clip, subtract: subtract, total: total,
         distanceMeters: distanceMeters, isShortMove: isShortMove,

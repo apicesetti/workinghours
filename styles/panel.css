@@ -106,3 +106,6 @@
 .wh-field input { width: 90px; }
 #workingHours textarea { width: 100%; resize: vertical; }
 #wh-zone-search { width: 100%; }
+.wh-odo { display: block; font-variant-numeric: tabular-nums; }
+#wh-tab-sheets .wh-table td { white-space: normal; }
+#wh-tab-sheets .wh-table td:first-child { white-space: nowrap; }

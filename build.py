@@ -16,7 +16,7 @@ DIST.mkdir(exist_ok=True)
 
 BASE_URL = (sys.argv[1] if len(sys.argv) > 1
             else "https://apicesetti.github.io/workinghours").rstrip("/")
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 MENU = {"es": "Horas de trabajo", "en": "Working hours"}
 
 mygeotab = {

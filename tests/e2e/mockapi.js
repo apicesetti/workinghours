@@ -62,6 +62,28 @@
         ],
         AddInData: []
     };
+    // odómetro y distancia por viaje (metros, acumulado por vehículo) y StatusData de odómetro ajustado
+    (function () {
+        var odo = { b4: 225500000, b3: 118000000 };
+        db.Trip.forEach(function (t) {
+            if (t.distance == null) { t.distance = 20; }
+            var d = t.device.id;
+            odo[d] = (odo[d] || 100000000) + t.distance * 1000;
+            if (t.odometer == null) { t.odometer = odo[d]; }
+        });
+    }());
+    function odometerAt(deviceId, ms) {
+        var trips = db.Trip.filter(function (t) { return t.device.id === deviceId; })
+            .sort(function (a, b) { return new Date(a.start) - new Date(b.start); });
+        var val = null;
+        trips.forEach(function (t) {
+            var a = new Date(t.start).getTime(), b = new Date(t.stop).getTime();
+            if (ms >= b) { val = t.odometer; }
+            else if (ms > a) { val = t.odometer - t.distance * 1000 * (b - ms) / (b - a); }
+            else if (val == null) { val = t.odometer - t.distance * 1000; }
+        });
+        return val;
+    }
     window.__db = db;
     window.__calls = [];
     window.__notifications = [];
@@ -85,6 +107,12 @@
             return list.map(function (e) {
                 return { id: e.id, addInId: e.addInId, details: s.selectClause ? JSON.parse(JSON.stringify(e.details[s.selectClause])) : JSON.parse(JSON.stringify(e.details)) };
             });
+        }
+        if (p.typeName === 'StatusData') {
+            if (window.__denyStatusData) { throw { name: 'MissingMethodException', message: 'StatusData not allowed' }; }
+            var v = odometerAt(s.deviceSearch.id, new Date(s.fromDate).getTime());
+            return v == null ? [] : [{ data: v + (window.__odoAdjust || 0), dateTime: s.fromDate, device: { id: s.deviceSearch.id },
+                diagnostic: { id: s.diagnosticSearch.id } }];
         }
         if (s.id) { list = list.filter(function (e) { return e.id === s.id; }); }
         if (s.name) { list = list.filter(function (e) { return e.name === s.name; }); }

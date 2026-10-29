@@ -1,6 +1,10 @@
 """Prueba de punta a punta de la página de MyGeotab con el API simulado."""
 import pathlib, sys, csv, io
 from playwright.sync_api import sync_playwright
+import datetime
+
+AR = datetime.timezone(datetime.timedelta(hours=-3))
+FIXED_NOW = datetime.datetime.now(AR).replace(hour=18, minute=30, second=0, microsecond=0)
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 HERE = pathlib.Path(__file__).parent
@@ -37,7 +41,9 @@ with sync_playwright() as p:
     page = ctx.new_page()
     page.on('pageerror', lambda e: errors.append('pageerror: %s' % e))
     page.on('console', lambda m: m.type == 'error' and errors.append('console: %s' % m.text))
+    page.clock.set_fixed_time(FIXED_NOW)
     page.add_init_script(path=str(HERE / 'mockapi.js'))
+    page.add_init_script("window.print = function () { try { window.top.__printed = (window.top.__printed || 0) + 1; window.top.__printedHtml = document.body.innerText; } catch (e) {} };")
     page.goto((REPO / 'workingHours.html').as_uri())
     page.evaluate(SEED)
     page.evaluate("""() => new Promise(res => {
@@ -102,6 +108,30 @@ with sync_playwright() as p:
     text = pathlib.Path(dl.value.path()).read_text(encoding='utf-8-sig')
     data = list(csv.reader(io.StringIO(text), delimiter=';'))
     check(data[0][0] == 'Fecha' and len(data) == 4, 'CSV de visitas (3 filas + encabezado)')
+
+    # --- Planillas (registro guardado con la clave vieja por vehículo: se normaliza a conductor + día)
+    page.click('.wh-tab[data-tab=sheets]')
+    prow = page.locator('#wh-sheets tr', has_text='Mauricio Falcon')
+    check(page.locator('#wh-sheets tr').count() == 3, 'una planilla por conductor')
+    t = prow.inner_text()
+    print('      planilla Falcon:', t.replace('\n', ' | ').replace('\t', ' | '))
+    check('225.500,0' in t and '225.580,0' in t and '80,0' in t, 'odómetros ajustados y km de la planilla')
+    check('Cristian Vargas' in t, 'acompañantes del registro viejo (clave por vehículo)')
+    check('YPF Loma Campana' in t and 'Batería 8' in t, 'visitas con horario')
+    check('20,0' in t, 'km entre clientes')
+    check('Pendiente' in t, 'sin confirmación del conductor')
+    page.screenshot(path=str(OUT / 'panel_6_planillas.png'), full_page=True)
+    with page.expect_download() as dl:
+        page.click('#wh-p-export')
+    data = list(csv.reader(io.StringIO(pathlib.Path(dl.value.path()).read_text(encoding='utf-8-sig')), delimiter=';'))
+    hdr = data[0]
+    falcon = [r for r in data[1:] if r[1] == 'Mauricio Falcon'][0]
+    check(falcon[hdr.index('Odómetro inicial')] == '225500,0' and falcon[hdr.index('Km recorridos')] == '80,0', 'CSV con odómetros en formato Excel AR')
+    check(falcon[hdr.index('Odómetro')] == 'ajustado', 'CSV indica el origen del odómetro')
+    page.click('#wh-p-print')
+    page.wait_for_timeout(800)
+    check(page.evaluate('window.__printed') == 1, 'abre la impresión')
+    check('Planilla diaria' in (page.evaluate('window.__printedHtml') or ''), 'imprime una hoja por planilla')
 
     # --- Configuración
     page.click('.wh-tab[data-tab=settings]')

@@ -87,3 +87,14 @@
 .whd-stop.is-done { border-left-color: var(--whd-ok-fg); }
 .whd-stop-time { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 15px; }
 .whd-stop-time span { color: var(--whd-muted); font-size: 14px; }
+
+.whd-sheet { background: var(--whd-card); border: 1px solid var(--whd-line); border-radius: 12px; margin-top: 10px; overflow: hidden; }
+.whd-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--whd-line); }
+.whd-row:last-child { border-bottom: 0; }
+.whd-row span { color: var(--whd-muted); font-size: 14px; flex: none; }
+.whd-row b { font-weight: 500; text-align: right; font-variant-numeric: tabular-nums; }
+.whd-row small, .whd-list b small { display: block; color: var(--whd-muted); font-weight: 400; font-size: 13px; }
+.whd-list b { font-weight: 500; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.whd-warn-txt { color: var(--whd-warn-fg); }
+#whDrive .whd-msg .whd-btn { margin-left: 8px; }
+.whd-bar-static { position: static; background: none; }

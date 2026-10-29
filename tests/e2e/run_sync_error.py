@@ -1,6 +1,10 @@
 """El aviso de sincronización muestra el error del servidor y 'Reintentar' lo resuelve."""
 import pathlib, sys
 from playwright.sync_api import sync_playwright
+import datetime
+
+AR = datetime.timezone(datetime.timedelta(hours=-3))
+FIXED_NOW = datetime.datetime.now(AR).replace(hour=18, minute=30, second=0, microsecond=0)
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 HERE = pathlib.Path(__file__).parent
@@ -16,6 +20,7 @@ with sync_playwright() as p:
     b = p.chromium.launch()
     page = b.new_context(viewport={'width': 400, 'height': 820}, timezone_id='America/Argentina/Buenos_Aires').new_page()
     page.on('pageerror', lambda e: errors.append('pageerror: %s' % e))
+    page.clock.set_fixed_time(FIXED_NOW)
     page.add_init_script(path=str(HERE / 'mockapi.js'))
     page.goto((REPO / 'workingHoursDrive.html').as_uri())
     # el servidor rechaza escrituras en AddInData como lo haría MyGeotab sin permiso

@@ -19,6 +19,7 @@
             <button class="wh-tab is-active" data-tab="hours" role="tab">Horas</button>
             <button class="wh-tab" data-tab="jornadas" role="tab">Jornadas</button>
             <button class="wh-tab" data-tab="clients" role="tab">Clientes</button>
+            <button class="wh-tab" data-tab="sheets" role="tab">Planillas</button>
             <button class="wh-tab" data-tab="settings" role="tab">Configuración</button>
         </nav>
     </header>
@@ -144,6 +145,40 @@
             </table>
         </div>
         <p id="wh-visits-empty" class="wh-empty" hidden>Sin visitas a clientes en el período.</p>
+    </section>
+
+    <!-- ============ PLANILLAS ============ -->
+    <section id="wh-tab-sheets" class="wh-panel" hidden>
+        <div class="wh-toolbar">
+            <input id="wh-p-filter" type="search" placeholder="Conductor, vehículo, acompañante o cliente…" autocomplete="off">
+            <select id="wh-p-state">
+                <option value="all">Todas</option>
+                <option value="confirmed">Confirmadas</option>
+                <option value="pending">Sin confirmar o con cambios</option>
+            </select>
+            <span class="wh-spacer"></span>
+            <button id="wh-p-print" class="wh-btn wh-btn-ghost">Imprimir</button>
+            <button id="wh-p-export" class="wh-btn wh-btn-ghost">Exportar CSV</button>
+        </div>
+        <div class="wh-table-wrap">
+            <table class="wh-table">
+                <thead>
+                <tr>
+                    <th>Fecha</th>
+                    <th>Conductor / vehículo</th>
+                    <th>Acompañantes</th>
+                    <th>Salida · odóm. inicial</th>
+                    <th>Visitas a clientes</th>
+                    <th>Llegada · odóm. final</th>
+                    <th class="wh-num">Km totales<br><span class="wh-muted">entre clientes</span></th>
+                    <th>Conductor confirmó</th>
+                </tr>
+                </thead>
+                <tbody id="wh-sheets"></tbody>
+            </table>
+        </div>
+        <p id="wh-sheets-empty" class="wh-empty" hidden>No hay planillas para mostrar.</p>
+        <p class="wh-foot">Odómetro ajustado de MyGeotab (DiagnosticOdometerAdjustmentId), el mismo del reporte "Odómetro por día". Las celdas marcadas con * usan el odómetro de los viajes porque no se pudo leer el ajustado.</p>
     </section>
 
     <!-- ============ CONFIGURACIÓN ============ -->

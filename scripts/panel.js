@@ -148,13 +148,18 @@ geotab.addin.workingHours = function () {
             var tripsByDevice = {};
             trips.forEach(function (t) { var d = S.idOf(t.device); (tripsByDevice[d] = tripsByDevice[d] || []).push(t); });
             items = jornadas.map(function (j) {
+                var jt = [];
+                S.deviceIdsOf(j).forEach(function (d) { jt = jt.concat(tripsByDevice[d] || []); });
                 return {
                     jornada: j,
-                    timeline: S.buildTimeline(j, tripsByDevice[j.deviceId] || [], { zones: zones, settings: settings }),
-                    rec: byKey[j.key] || null
+                    timeline: S.buildTimeline(j, jt, { zones: zones, settings: settings }),
+                    rec: byKey[j.key] || null,
+                    odo: null
                 };
             });
-            // registros cargados para jornadas que ya no aparecen (p. ej. borradas) igual se listan
+            setBusy(true, 'Leyendo odómetros…');
+            return loadOdometers(items);
+        }).then(function () {
             recompute();
             setBusy(false);
             renderAll();
@@ -165,6 +170,33 @@ geotab.addin.workingHours = function () {
             showMsg('No se pudo cargar: ' + errText(e), 'error');
         });
     }
+
+    /**
+     * Odómetro ajustado (DiagnosticOdometerAdjustmentId, el mismo de ODOMETER_REPORT) en la salida
+     * y el fin de cada vehículo de cada jornada. Si falla, la planilla usa el odómetro de los viajes.
+     */
+    function loadOdometers(list) {
+        var reqs = [];
+        list.forEach(function (it, i) { S.odometerRequests(it.timeline).forEach(function (r) { r.item = i; reqs.push(r); }); });
+        var chunks = [];
+        for (var k = 0; k < reqs.length; k += 50) { chunks.push(reqs.slice(k, k + 50)); }
+        return chunks.reduce(function (p, chunk) {
+            return p.then(function () {
+                return multiCall(chunk.map(S.odometerCall)).then(function (res) {
+                    var byItem = {};
+                    chunk.forEach(function (r, i) { (byItem[r.item] = byItem[r.item] || { reqs: [], res: [] }); byItem[r.item].reqs.push(r); byItem[r.item].res.push(res[i]); });
+                    Object.keys(byItem).forEach(function (i) {
+                        var m = S.odometerMap(byItem[i].reqs, byItem[i].res);
+                        var it = list[i];
+                        it.odo = it.odo || {};
+                        Object.keys(m).forEach(function (d) { it.odo[d] = Object.assign(it.odo[d] || {}, m[d]); });
+                    });
+                });
+            });
+        }, Promise.resolve()).catch(function () { /* sin permiso a StatusData: odómetro de los viajes */ });
+    }
+
+    function vehiclesOf(j) { return S.deviceIdsOf(j).map(dName).join(' + '); }
 
     function recompute() {
         summary = S.summarize(items);
@@ -177,7 +209,7 @@ geotab.addin.workingHours = function () {
                     return S.clip([{ from: v.from, to: v.to }], p.from, p.to).length;
                 }).map(function (p) { return p.userId; });
                 visits.push({
-                    date: it.jornada.date, key: it.jornada.key, deviceId: it.jornada.deviceId,
+                    date: it.jornada.date, key: it.jornada.key, deviceId: v.deviceId || it.jornada.deviceId,
                     client: v.clients.join(', '), from: v.from, to: v.to, duration: v.to - v.from,
                     people: present, confirmed: v.confirmed
                 });
@@ -290,7 +322,7 @@ geotab.addin.workingHours = function () {
             if (st === 'pending' && loaded) { return false; }
             if (st === 'loaded' && !loaded) { return false; }
             if (st === 'stops' && !missingStops(it)) { return false; }
-            return matches(dName(it.jornada.deviceId) + ' ' + uName(it.jornada.driverId) + ' ' + crewText(it), filter);
+            return matches(vehiclesOf(it.jornada) + ' ' + uName(it.jornada.driverId) + ' ' + crewText(it), filter);
         }).sort(function (a, b) { return b.jornada.firstAt - a.jornada.firstAt; });
     }
 
@@ -304,7 +336,7 @@ geotab.addin.workingHours = function () {
                 : (it.rec.status === 'closed' ? '<span class="wh-badge wh-badge-ok">Cerrada</span>' : '<span class="wh-badge">Abierta</span>');
             return '<tr>'
                 + '<td>' + fmtDate(j.date) + '</td>'
-                + '<td>' + esc(dName(j.deviceId)) + '</td>'
+                + '<td>' + esc(vehiclesOf(j)) + '</td>'
                 + '<td>' + esc(uName(j.driverId)) + '</td>'
                 + '<td class="wh-wrap">' + esc(crewText(it)) + '</td>'
                 + '<td>' + S.hhmm(tl.firstStart) + '</td>'
@@ -323,7 +355,7 @@ geotab.addin.workingHours = function () {
         var rows = [['Fecha', 'Vehículo', 'Chofer', 'Acompañantes', 'Inicio', 'Fin', 'Horas fuera de oficina', 'Paradas sin cliente', 'Estado']];
         jornadaRows().forEach(function (it) {
             var tl = it.timeline;
-            rows.push([it.jornada.date, dName(it.jornada.deviceId), uName(it.jornada.driverId), crewText(it),
+            rows.push([it.jornada.date, vehiclesOf(it.jornada), uName(it.jornada.driverId), crewText(it),
                 S.hhmm(tl.firstStart), S.hhmm(tl.lastStop), S.hoursDecimal(S.total(tl.outside)), missingStops(it),
                 !S.hasCrew(it.rec) ? 'Sin cargar' : (it.rec.status === 'closed' ? 'Cerrada' : 'Abierta')]);
         });
@@ -348,10 +380,10 @@ geotab.addin.workingHours = function () {
         if (!it) { return; }
         modalKey = key;
         draft = it.rec ? S.clone(it.rec) : S.newCrewRecord(it.jornada, {
-            deviceName: dName(it.jornada.deviceId), driverName: uName(it.jornada.driverId), by: session.userName, source: 'panel'
+            deviceName: vehiclesOf(it.jornada), driverName: uName(it.jornada.driverId), by: session.userName, source: 'panel'
         });
         if (it.rec) { draft._id = it.rec._id; }
-        $('#wh-modal-title').textContent = dName(it.jornada.deviceId) + ' · ' + fmtDate(it.jornada.date) + ' · ' + uName(it.jornada.driverId);
+        $('#wh-modal-title').textContent = uName(it.jornada.driverId) + ' · ' + fmtDate(it.jornada.date) + ' · ' + vehiclesOf(it.jornada);
         renderModal();
         $('#wh-modal').hidden = false;
     }
@@ -643,19 +675,158 @@ geotab.addin.workingHours = function () {
     }
 
     // ------------------------------------------------------------------
+    // Pestaña Planillas (reemplaza la planilla en papel)
+    // ------------------------------------------------------------------
+    function sheetRows() {
+        var filter = ($('#wh-p-filter').value || '').toLowerCase();
+        var st = $('#wh-p-state').value;
+        return items.map(function (it) {
+            return { it: it, p: S.buildPlanilla(it.jornada, it.timeline, it.rec, it.odo) };
+        }).filter(function (r) {
+            if (!r.p) { return false; }
+            var ok = r.p.confirmation && !r.p.changed;
+            if (st === 'confirmed' && !ok) { return false; }
+            if (st === 'pending' && ok) { return false; }
+            return matches([uName(r.p.driverId), vehiclesOf(r.it.jornada), crewText(r.it),
+                r.p.visits.map(function (v) { return v.client; }).join(' ')].join(' '), filter);
+        }).sort(function (a, b) {
+            return a.p.date === b.p.date ? uName(a.p.driverId).localeCompare(uName(b.p.driverId), 'es') : (a.p.date < b.p.date ? 1 : -1);
+        });
+    }
+
+    function kmCell(v, which) {
+        var val = v[which];
+        return S.fmtKm(val) + (val != null && v.source !== 'ajustado' ? '*' : '');
+    }
+
+    function companionsText(p, html) {
+        if (!p.companions.length) { return p.solo ? 'Solo' : ''; }
+        return p.companions.map(function (c) {
+            var t = c.name + ' ' + S.hhmm(c.from) + '–' + (c.to ? S.hhmm(c.to) : 'fin');
+            return html ? esc(c.name) + ' <span class="wh-muted">' + S.hhmm(c.from) + '–' + (c.to ? S.hhmm(c.to) : 'fin') + '</span>' : t;
+        }).join(html ? '<br>' : ', ');
+    }
+
+    function confirmText(p) {
+        var c = p.confirmation;
+        if (!c) { return { cls: 'wh-badge-warn', text: 'Pendiente' }; }
+        var when = new Date(c.confirmedAt).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+        return p.changed ? { cls: 'wh-badge-warn', text: 'Cambió después (' + when + ')' } : { cls: 'wh-badge-ok', text: '✓ ' + when };
+    }
+
+    function renderSheets() {
+        var rows = sheetRows();
+        $('#wh-sheets').innerHTML = rows.map(function (r) {
+            var p = r.p, multi = p.vehicles.length > 1;
+            var veh = function (v) { return multi ? '<span class="wh-muted">' + esc(dName(v.deviceId)) + ':</span> ' : ''; };
+            var c = confirmText(p);
+            var odo = function (which) {
+                return p.vehicles.map(function (v) { return '<span class="wh-odo">' + veh(v) + kmCell(v, which) + ' km</span>'; }).join('');
+            };
+            return '<tr>'
+                + '<td>' + fmtDate(p.date) + '</td>'
+                + '<td>' + esc(uName(p.driverId)) + '<br><span class="wh-muted">' + esc(vehiclesOf(r.it.jornada)) + '</span></td>'
+                + '<td class="wh-wrap">' + (companionsText(p, true) || '<span class="wh-muted">—</span>') + '</td>'
+                + '<td><b>' + S.hhmm(p.depart.at) + '</b>' + (p.depart.kind === 'unknown' ? '' : ' <span class="wh-muted">' + esc(p.depart.place) + '</span>') + odo('odoStart') + '</td>'
+                + '<td class="wh-wrap">' + (p.visits.map(function (v) {
+                    return esc(v.client) + ' <span class="wh-muted">' + S.hhmm(v.from) + '–' + S.hhmm(v.to) + '</span>';
+                }).join('<br>') || '<span class="wh-muted">—</span>') + '</td>'
+                + '<td><b>' + S.hhmm(p.arrive.at) + '</b> <span class="wh-muted">' + esc(p.arrive.place) + '</span>' + odo('odoEnd') + '</td>'
+                + '<td class="wh-num"><b>' + S.fmtKm(p.kmTotal) + '</b><br><span class="wh-muted">' + S.fmtKm(p.kmBetweenClients) + '</span></td>'
+                + '<td><span class="wh-badge ' + c.cls + '"' + (p.confirmation && p.confirmation.notes ? ' title="' + esc(p.confirmation.notes) + '"' : '') + '>'
+                + esc(c.text) + '</span>' + (p.confirmation && p.confirmation.notes ? ' <span class="wh-muted" title="' + esc(p.confirmation.notes) + '">💬</span>' : '') + '</td>'
+                + '</tr>';
+        }).join('');
+        $('#wh-sheets-empty').hidden = !!rows.length;
+    }
+
+    function csvKm(v) { return v == null ? '' : v.toFixed(1).replace('.', ','); }
+
+    function exportSheets() {
+        var rows = [['Fecha', 'Conductor', 'Legajo', 'Vehículo', 'Acompañantes', 'Hora de salida', 'Salida desde', 'Odómetro inicial',
+            'Odómetro final', 'Km recorridos', 'Km entre clientes', 'Visitas (cliente desde-hasta)', 'Hora de llegada', 'Llegada a',
+            'Odómetro', 'Confirmada por el conductor', 'Observaciones']];
+        sheetRows().forEach(function (r) {
+            var p = r.p;
+            // una fila por vehículo; los datos de la jornada se repiten
+            p.vehicles.forEach(function (v, i) {
+                rows.push([p.date, uName(p.driverId), uLegajo(p.driverId), dName(v.deviceId), companionsText(p, false),
+                    S.hhmm(p.depart.at), p.depart.kind === 'unknown' ? '' : p.depart.place, csvKm(v.odoStart), csvKm(v.odoEnd), csvKm(v.km),
+                    i === 0 ? csvKm(p.kmBetweenClients) : '',
+                    i === 0 ? p.visits.map(function (x) { return x.client + ' ' + S.hhmm(x.from) + '-' + S.hhmm(x.to); }).join(' | ') : '',
+                    S.hhmm(p.arrive.at), p.arrive.place, v.source,
+                    confirmText(p).text, (p.confirmation && p.confirmation.notes) || '']);
+            });
+        });
+        download('planillas_' + range.from + '_' + range.to + '.csv', S.csv(rows));
+    }
+
+    /** Una hoja por planilla, lista para imprimir o guardar en PDF (registro para ISO 9001). */
+    function printSheets() {
+        var rows = sheetRows();
+        if (!rows.length) { showMsg('No hay planillas para imprimir.', 'error'); return; }
+        var pages = rows.map(function (r) {
+            var p = r.p, c = confirmText(p);
+            var line = function (k, v) { return '<tr><th>' + esc(k) + '</th><td>' + v + '</td></tr>'; };
+            var html = '<section><h1>Planilla diaria</h1><p class="sub">' + esc(uName(p.driverId))
+                + (uLegajo(p.driverId) ? ' · Legajo ' + esc(uLegajo(p.driverId)) : '') + ' · ' + fmtDate(p.date) + '</p><table>';
+            html += line('Vehículo', esc(vehiclesOf(r.it.jornada)));
+            html += line('Acompañantes', esc(companionsText(p, false)) || '—');
+            html += line('Hora de salida', S.hhmm(p.depart.at) + (p.depart.kind === 'unknown' ? '' : ' · ' + esc(p.depart.place)));
+            p.vehicles.forEach(function (v) {
+                var n = p.vehicles.length > 1 ? ' (' + esc(dName(v.deviceId)) + ')' : '';
+                html += line('Odómetro inicial' + n, kmCell(v, 'odoStart') + ' km');
+                html += line('Odómetro final' + n, kmCell(v, 'odoEnd') + ' km');
+            });
+            html += line('Km recorridos totales', S.fmtKm(p.kmTotal) + ' km');
+            html += line('Km recorridos entre clientes', S.fmtKm(p.kmBetweenClients) + ' km');
+            html += line('Hora de llegada', S.hhmm(p.arrive.at) + ' · ' + esc(p.arrive.place));
+            html += '</table><h2>Visitas a clientes</h2><table class="grid"><tr><th>Cliente</th><th>Desde</th><th>Hasta</th></tr>'
+                + (p.visits.map(function (v) {
+                    return '<tr><td>' + esc(v.client) + '</td><td>' + S.hhmm(v.from) + '</td><td>' + S.hhmm(v.to) + '</td></tr>';
+                }).join('') || '<tr><td colspan="3">Sin visitas</td></tr>') + '</table>';
+            html += '<p class="sign">Confirmación del conductor: <b>' + esc(c.text) + '</b>'
+                + (p.confirmation ? ' · ' + esc(p.confirmation.confirmedBy) : '') + '</p>'
+                + (p.confirmation && p.confirmation.notes ? '<p>Observaciones: ' + esc(p.confirmation.notes) + '</p>' : '')
+                + '<p class="foot">Generada desde MyGeotab · Horas de trabajo · ' + new Date().toLocaleString('es-AR')
+                + (p.vehicles.some(function (v) { return v.source !== 'ajustado'; }) ? ' · * odómetro de los viajes' : '') + '</p></section>';
+            return html;
+        }).join('');
+        var doc = '<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><title>Planillas ' + esc(range.from) + '</title><style>'
+            + 'body{font:12pt Arial,sans-serif;color:#111;margin:0}section{padding:16mm;page-break-after:always}'
+            + 'h1{font-size:18pt;margin:0}h2{font-size:13pt;margin:18px 0 6px}.sub{margin:4px 0 14px;color:#444}'
+            + 'table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #ccc;vertical-align:top}'
+            + 'th{width:40%;font-weight:600}.grid th{width:auto;background:#eee}.sign{margin-top:24px}.foot{color:#666;font-size:9pt;margin-top:18px}'
+            + '</style></head><body>' + pages + '</body></html>';
+        var frame = document.createElement('iframe');
+        frame.setAttribute('aria-hidden', 'true');
+        frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
+        document.body.appendChild(frame);
+        var w = frame.contentWindow;
+        w.document.open();
+        w.document.write(doc);
+        w.document.close();
+        setTimeout(function () {
+            try { w.focus(); w.print(); } catch (e) { showMsg('No se pudo abrir la impresión: ' + errText(e), 'error'); }
+            setTimeout(function () { frame.remove(); }, 60000);
+        }, 300);
+    }
+
+    // ------------------------------------------------------------------
     // Render general y eventos
     // ------------------------------------------------------------------
     function renderAll() {
         renderHours();
         renderJornadas();
         renderClients();
+        renderSheets();
         if (tab === 'settings') { renderSettings(); }
     }
 
     function showTab(name) {
         tab = name;
         root.querySelectorAll('.wh-tab').forEach(function (b) { b.classList.toggle('is-active', b.getAttribute('data-tab') === name); });
-        ['hours', 'jornadas', 'clients', 'settings'].forEach(function (t) { $('#wh-tab-' + t).hidden = t !== name; });
+        ['hours', 'jornadas', 'clients', 'sheets', 'settings'].forEach(function (t) { $('#wh-tab-' + t).hidden = t !== name; });
         if (name === 'settings') { renderSettings(); }
     }
 
@@ -664,6 +835,10 @@ geotab.addin.workingHours = function () {
             b.addEventListener('click', function () { showTab(b.getAttribute('data-tab')); });
         });
         $('#wh-load').addEventListener('click', function () { if (!busy) { load(); } });
+        $('#wh-p-filter').addEventListener('input', renderSheets);
+        $('#wh-p-state').addEventListener('change', renderSheets);
+        $('#wh-p-export').addEventListener('click', exportSheets);
+        $('#wh-p-print').addEventListener('click', printSheets);
         $('#wh-h-filter').addEventListener('input', renderHours);
         $('#wh-j-filter').addEventListener('input', renderJornadas);
         $('#wh-j-state').addEventListener('change', renderJornadas);

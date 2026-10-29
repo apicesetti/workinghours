@@ -205,7 +205,9 @@ geotab.addin.workingHoursDrive = function () {
             });
             saveRecordsLocal();
             lsSet('checkedAt', Date.now());
-            return loadDeviceNames(jornadas.map(function (j) { return j.deviceId; }));
+            var ids = [];
+            jornadas.forEach(function (j) { S.deviceIdsOf(j).forEach(function (d) { if (ids.indexOf(d) < 0) { ids.push(d); } }); });
+            return loadDeviceNames(ids);
         }).then(function () {
             notifyPending();       // después de los nombres, para que el aviso diga en qué vehículo
         }).then(function () {
@@ -308,7 +310,7 @@ geotab.addin.workingHoursDrive = function () {
     function recordFor(j) {
         var r = records[j.key];
         if (!r) {
-            r = S.newCrewRecord(j, { deviceName: devices[j.deviceId] || '', driverName: me ? me.name : '', by: by(), source: 'drive' });
+            r = S.newCrewRecord(j, { deviceName: vehiclesOf(j), driverName: me ? me.name : '', by: by(), source: 'drive' });
         }
         return r;
     }
@@ -345,16 +347,17 @@ geotab.addin.workingHoursDrive = function () {
             if (!S.hasCrew(rec)) { crew = '<span class="whd-pill whd-pill-warn">Falta cargar acompañantes</span>'; }
             else if (rec.solo && !names.length) { crew = '<span class="whd-pill">Viajó solo</span>'; }
             else { crew = '<span class="whd-pill whd-pill-ok">' + esc(names.join(', ') || 'Sin acompañantes ahora') + '</span>'; }
-            var closed = rec && rec.status === 'closed';
+            var confirmed = rec && rec.planilla;
             var dayLbl = j.date === day ? 'Hoy' : 'Ayer';
-            return '<article class="whd-card' + (closed ? ' is-closed' : '') + '">'
-                + '<div class="whd-card-head"><div><h2>' + esc(devices[j.deviceId] || j.deviceId) + '</h2>'
-                + '<p class="whd-sub">' + dayLbl + ' · identificado a las ' + S.hhmm(j.firstAt) + (closed ? ' · jornada cerrada' : '') + '</p></div></div>'
-                + '<div class="whd-crew">' + crew + '</div>'
+            return '<article class="whd-card">'
+                + '<div class="whd-card-head"><div><h2>' + esc(vehiclesOf(j)) + '</h2>'
+                + '<p class="whd-sub">' + dayLbl + ' · identificado a las ' + S.hhmm(j.firstAt) + '</p></div></div>'
+                + '<div class="whd-crew">' + crew
+                + (confirmed ? ' <span class="whd-pill whd-pill-ok">Planilla confirmada</span>' : '') + '</div>'
                 + '<div class="whd-actions">'
                 + '<button class="whd-btn" data-act="crew" data-key="' + esc(j.key) + '">' + (S.hasCrew(rec) ? 'Tripulación' : 'Cargar acompañantes') + '</button>'
                 + '<button class="whd-btn whd-btn-ghost" data-act="stops" data-key="' + esc(j.key) + '">Paradas y clientes</button>'
-                + (closed ? '' : '<button class="whd-btn whd-btn-ghost" data-act="close" data-key="' + esc(j.key) + '">Cerrar jornada</button>')
+                + '<button class="whd-btn whd-btn-ghost" data-act="sheet" data-key="' + esc(j.key) + '">Planilla</button>'
                 + '</div></article>';
         }).join('');
     }
@@ -382,7 +385,7 @@ geotab.addin.workingHoursDrive = function () {
         var filter = ($('#whd-search') && $('#whd-search').value || '').toLowerCase();
 
         var html = '<button class="whd-back" data-act="home">‹ Volver</button>'
-            + '<h2 class="whd-title">' + esc(devices[j.deviceId] || j.deviceId) + '</h2>'
+            + '<h2 class="whd-title">' + esc(vehiclesOf(j)) + '</h2>'
             + '<p class="whd-sub">Identificado a las ' + S.hhmm(j.firstAt) + '</p>';
 
         if (current.length) {
@@ -458,25 +461,111 @@ geotab.addin.workingHoursDrive = function () {
     // ------------------------------------------------------------------
     // Vista: paradas
     // ------------------------------------------------------------------
+    /**
+     * Viajes de todos los vehículos de la jornada + odómetro ajustado (el de ODOMETER_REPORT).
+     * Se guarda una versión reducida en el teléfono para verla sin señal.
+     */
     function loadTimeline(j) {
         if (!isOnline()) { return Promise.resolve(timelines[j.key] || lsGet('tl.' + j.key, null)); }
         var from = S.dayStart(j.date), to = Math.min(S.dayEnd(j.date), Date.now());
-        // DriverChange de todo el vehículo para cortar la jornada si otra persona lo usó
-        return Promise.all([loadZones(), multiCall([
-            ['Get', { typeName: 'DriverChange', search: { deviceSearch: { id: j.deviceId }, fromDate: S.iso(from), toDate: S.iso(to) } }],
+        var devs = S.deviceIdsOf(j);
+        var calls = [];
+        devs.forEach(function (d) {
+            // DriverChange de todo el vehículo para cortar la jornada si otra persona lo usó
+            calls.push(['Get', { typeName: 'DriverChange', search: { deviceSearch: { id: d }, fromDate: S.iso(from), toDate: S.iso(to) } }]);
             // desde el día anterior: el último viaje previo indica si salió de su casa o de la oficina
-            ['Get', { typeName: 'Trip', search: { deviceSearch: { id: j.deviceId }, fromDate: S.iso(S.dayStart(S.addDays(j.date, -1))), toDate: S.iso(to) } }]
-        ])]).then(function (r) {
-            var res = r[1];
+            calls.push(['Get', { typeName: 'Trip', search: { deviceSearch: { id: d }, fromDate: S.iso(S.dayStart(S.addDays(j.date, -1))), toDate: S.iso(to) } }]);
+        });
+        var tl;
+        return Promise.all([loadZones(), multiCall(calls)]).then(function (r) {
+            var changes = [], trips = [];
+            r[1].forEach(function (list, i) { (i % 2 ? trips : changes).push.apply(i % 2 ? trips : changes, list || []); });
             // cualquier otra persona (o llave de mantenimiento) que se identificó corta mi tramo
-            var full = S.buildJornadas(res[0], { now: Date.now() })
+            var full = S.buildJornadas(changes, { now: Date.now() })
                 .filter(function (x) { return x.key === j.key; })[0] || j;
-            var tl = S.buildTimeline(full, res[1], { zones: zones, settings: settings });
-            var slim = { stops: tl.stops, firstStart: tl.firstStart, lastStop: tl.lastStop, at: Date.now() };
+            tl = S.buildTimeline(full, trips, { zones: zones, settings: settings });
+            var reqs = S.odometerRequests(tl);
+            return multiCall(reqs.map(S.odometerCall)).then(function (res) { return S.odometerMap(reqs, res); })
+                .catch(function () { return null; });   // sin permiso a StatusData: se usa el odómetro de los viajes
+        }).then(function (odo) {
+            var slim = { stops: tl.stops, legs: tl.legs, sheet: tl.sheet, firstStart: tl.firstStart, lastStop: tl.lastStop, odo: odo, at: Date.now() };
             timelines[j.key] = slim;
             lsSet('tl.' + j.key, slim);
             return slim;
         });
+    }
+
+    // ------------------------------------------------------------------
+    // Vista: planilla del día
+    // ------------------------------------------------------------------
+    function renderSheet() {
+        var j = findJornada(view.key);
+        if (!j) { return '<p class="whd-empty">Jornada no encontrada.</p>'; }
+        var tl = timelines[j.key] || lsGet('tl.' + j.key, null);
+        var html = '<button class="whd-back" data-act="home">‹ Volver</button>'
+            + '<h2 class="whd-title">Planilla · ' + (j.date === today() ? 'hoy' : j.date.split('-').reverse().join('/')) + '</h2>';
+        if (!tl || !tl.sheet) {
+            return html + '<p class="whd-empty">' + (!tl && isOnline() ? 'Cargando viajes y odómetro…'
+                : (tl ? 'Sin viajes registrados en la jornada.' : 'Sin conexión: la planilla se arma cuando haya señal.')) + '</p>';
+        }
+        var rec = recordFor(j);
+        var p = S.buildPlanilla(j, tl, rec, tl.odo);
+        var row = function (label, value) { return '<div class="whd-row"><span>' + esc(label) + '</span><b>' + value + '</b></div>'; };
+        html += '<div class="whd-sheet">';
+        html += row('Salida', S.hhmm(p.depart.at) + (p.depart.kind === 'unknown' ? '' : ' <small>desde ' + esc(p.depart.place) + '</small>'));
+        p.vehicles.forEach(function (v) {
+            var name = p.vehicles.length > 1 ? ' · ' + esc(devices[v.deviceId] || v.deviceId) : '';
+            html += row('Odómetro inicial' + name, S.fmtKm(v.odoStart) + ' km');
+            html += row('Odómetro final' + name, S.fmtKm(v.odoEnd) + ' km');
+        });
+        html += row('Km recorridos', S.fmtKm(p.kmTotal) + ' km');
+        html += row('Km entre clientes', S.fmtKm(p.kmBetweenClients) + ' km');
+        html += row('Llegada', S.hhmm(p.arrive.at) + ' <small>a ' + esc(p.arrive.place) + '</small>');
+        html += row('Acompañantes', p.companions.length
+            ? p.companions.map(function (c) { return esc(c.name) + ' <small>' + S.hhmm(c.from) + '–' + (c.to ? S.hhmm(c.to) : 'fin') + '</small>'; }).join('<br>')
+            : (p.solo ? 'Viajó solo' : '<span class="whd-warn-txt">Sin cargar</span>'));
+        html += '</div>';
+
+        html += '<h3>Visitas a clientes</h3>';
+        if (p.visits.length) {
+            html += '<ul class="whd-list">' + p.visits.map(function (v) {
+                return '<li><span>' + esc(v.client) + (v.confirmed ? '' : '<small>por geocerca, sin confirmar</small>') + '</span><b>'
+                    + S.hhmm(v.from) + ' – ' + S.hhmm(v.to) + '</b></li>';
+            }).join('') + '</ul>';
+        } else {
+            html += '<p class="whd-hint">Sin visitas. Si estuviste en clientes, cargalos en "Paradas y clientes".</p>';
+        }
+        var pending = S.stopsToAsk(tl).filter(function (s) { return !S.stopEntry(rec, s.tripId) && !s.zone; }).length;
+        if (pending) {
+            html += '<p class="whd-msg whd-msg-error">' + pending + (pending === 1 ? ' parada sin cliente.' : ' paradas sin cliente.')
+                + ' <button class="whd-btn whd-btn-sm whd-btn-ghost" data-act="stops" data-key="' + esc(j.key) + '">Completar</button></p>';
+        }
+        if (p.vehicles.some(function (v) { return v.source !== 'ajustado'; })) {
+            html += '<p class="whd-hint">Odómetro tomado de los viajes (no se pudo leer el odómetro ajustado).</p>';
+        }
+
+        var c = p.confirmation;
+        if (c && !p.changed) {
+            html += '<p class="whd-msg whd-msg-ok">Confirmada el ' + new Date(c.confirmedAt).toLocaleString('es-AR') + '.</p>';
+        } else if (c && p.changed) {
+            html += '<p class="whd-msg whd-msg-error">La planilla cambió desde que la confirmaste. Revisala y volvé a confirmar.</p>';
+        }
+        html += '<h3>Observaciones</h3><textarea id="whd-notes" class="whd-input" rows="3" maxlength="500" placeholder="Opcional">'
+            + esc(c ? c.notes : '') + '</textarea>'
+            + '<div class="whd-bar whd-bar-static"><button class="whd-btn" data-act="confirmSheet"' + (c && !p.changed ? ' disabled' : '') + '>'
+            + (c && !p.changed ? 'Planilla confirmada' : 'Confirmar planilla') + '</button></div>';
+        return html;
+    }
+
+    function confirmSheet() {
+        var j = findJornada(view.key);
+        var tl = j && (timelines[j.key] || lsGet('tl.' + j.key, null));
+        if (!tl || !tl.sheet) { return; }
+        var rec = S.clone(recordFor(j));
+        var p = S.buildPlanilla(j, tl, rec, tl.odo);
+        rec.planilla = S.planillaConfirmation(p, by(), ($('#whd-notes') || {}).value || '', devices);
+        saveLocal(rec, 'planilla', S.fmtKm(p.kmTotal) + ' km').then(render);
+        render();
     }
 
     function clientOptions(stop, entry) {
@@ -496,7 +585,7 @@ geotab.addin.workingHoursDrive = function () {
         if (!j) { return '<p class="whd-empty">Jornada no encontrada.</p>'; }
         var tl = timelines[j.key] || lsGet('tl.' + j.key, null);
         var html = '<button class="whd-back" data-act="home">‹ Volver</button>'
-            + '<h2 class="whd-title">Paradas · ' + esc(devices[j.deviceId] || j.deviceId) + '</h2>';
+            + '<h2 class="whd-title">Paradas · ' + esc(vehiclesOf(j)) + '</h2>';
         if (!tl) {
             return html + '<p class="whd-empty">' + (isOnline() ? 'Cargando viajes…' : 'Sin conexión: las paradas se cargan cuando haya señal.') + '</p>';
         }
@@ -561,30 +650,12 @@ geotab.addin.workingHoursDrive = function () {
     }
 
     // ------------------------------------------------------------------
-    // Cierre
-    // ------------------------------------------------------------------
-    function closeJornada(key) {
-        var j = findJornada(key);
-        if (!j) { return; }
-        var rec = recordFor(j);
-        var msg = '¿Cerrar la jornada en ' + (devices[j.deviceId] || j.deviceId) + '?';
-        if (!S.hasCrew(rec)) { msg += '\n\nTodavía no cargaste acompañantes: se registra que viajaste solo.'; }
-        var active = S.activeMembers(rec);
-        if (active.length) { msg += '\n\nSe marca que bajaron ahora: ' + active.map(function (m) { return m.name; }).join(', ') + '.'; }
-        if (!window.confirm(msg)) { return; }
-        rec = S.clone(rec);
-        if (!S.hasCrew(rec)) { rec.solo = true; }
-        rec.members.forEach(function (m) { if (!m.to) { m.to = S.iso(Date.now()); } });
-        rec.status = 'closed';
-        rec.closedAt = S.iso(Date.now());
-        rec.closedBy = by();
-        saveLocal(rec, 'close', '').then(render);
-        render();
-    }
-
-    // ------------------------------------------------------------------
     // Render y eventos
     // ------------------------------------------------------------------
+    function vehiclesOf(j) {
+        return S.deviceIdsOf(j).map(function (d) { return devices[d] || d; }).join(' + ');
+    }
+
     function findJornada(key) { return jornadas.filter(function (j) { return j.key === key; })[0] || null; }
 
     function render() {
@@ -595,6 +666,7 @@ geotab.addin.workingHoursDrive = function () {
         var html;
         if (view.name === 'crew') { html = renderCrew(); }
         else if (view.name === 'stops') { html = renderStops(); }
+        else if (view.name === 'sheet') { html = renderSheet(); }
         else { html = renderHome(); }
         var el = $('#whd-view');
         var search = $('#whd-search');
@@ -611,10 +683,21 @@ geotab.addin.workingHoursDrive = function () {
         view = { name: name, key: key || null };
         picked = {};
         render();
-        if (name === 'stops') {
+        if (name === 'stops' || name === 'sheet') {
             var j = findJornada(key);
             if (j) {
-                loadTimeline(j).then(render).catch(function (e) { showMsg('No se pudieron leer los viajes: ' + errText(e), 'error'); render(); });
+                // Primero se muestra lo guardado en el teléfono. Al llegar los datos del servidor se
+                // redibuja solo si cambiaron y si sigue en la misma vista: así no se pierde lo que el
+                // chofer está eligiendo en ese momento.
+                var fingerprint = function (tl) { return tl ? JSON.stringify([tl.stops, tl.legs, tl.sheet, tl.odo]) : ''; };
+                var shown = fingerprint(timelines[j.key] || lsGet('tl.' + j.key, null));
+                var same = function () { return view.name === name && view.key === key; };
+                loadTimeline(j).then(function (tl) {
+                    if (same() && fingerprint(tl) !== shown) { render(); }
+                }).catch(function (e) {
+                    showMsg('No se pudieron leer los viajes: ' + errText(e), 'error');
+                    if (same() && !shown) { render(); }
+                });
             }
         }
         if (root && root.scrollIntoView) { root.scrollIntoView(); }
@@ -636,11 +719,12 @@ geotab.addin.workingHoursDrive = function () {
             if (act === 'home') { go('home'); }
             else if (act === 'crew') { go('crew', key); }
             else if (act === 'stops') { go('stops', key); }
-            else if (act === 'close') { closeJornada(key); }
             else if (act === 'saveCrew') { saveCrew(); }
             else if (act === 'solo') { saveSolo(); }
             else if (act === 'drop') { dropMember(b.getAttribute('data-user')); }
             else if (act === 'saveStops') { saveStops(); }
+            else if (act === 'sheet') { go('sheet', key); }
+            else if (act === 'confirmSheet') { confirmSheet(); }
             else if (act === 'retry') {
                 b.disabled = true;
                 flush().then(function () {
