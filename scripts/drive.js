@@ -40,6 +40,8 @@ var factory = function () {
     var records = {};              // key → registro (con _id y _dirty)
     var timelines = {};            // key → línea de tiempo (para paradas)
     var view = { name: 'home', key: null };
+    var section = 'crew';          // 'crew' (Tripulación) | 'clients' (Clientes): pestaña del contenedor
+    var checkin = null;            // { status: 'locating'|'ok'|'none', pos: { lat, lon, acc, src } }
     var timer = null, checking = null, listening = false;
 
     // ------------------------------------------------------------------
@@ -318,7 +320,10 @@ var factory = function () {
         if (timer) { return; }
         var every = Math.max(1, settings.pollMinutes || 2) * 60000;
         timer = setInterval(function () {
-            check().then(function () { if (root && view.name === 'home') { render(); } }).catch(function () { /* reintenta */ });
+            check().then(function () {
+                if (root && view.name === 'home') { render(); }
+                if (root && view.name === 'clients') { loadClientTimelines().then(function () { if (view.name === 'clients') { render(); } }); }
+            }).catch(function () { /* reintenta */ });
         }, every);
         if (!listening && api && api.mobile && typeof api.mobile.listenTo === 'function') {
             listening = true;
@@ -397,7 +402,8 @@ var factory = function () {
     }
 
     function claimButton() {
-        return '<div class="whd-claim"><button class="whd-btn whd-btn-ghost" data-act="claimStart">¿Viajás de acompañante? Viajo con…</button></div>';
+        return (window.CESETTI_SHELL ? '' : '<div class="whd-claim"><button class="whd-btn whd-btn-ghost" data-act="sec" data-key="clients">Clientes ›</button></div>')
+            + '<div class="whd-claim"><button class="whd-btn whd-btn-ghost" data-act="claimStart">¿Viajás de acompañante? Viajo con…</button></div>';
     }
 
     function renderHome() {
@@ -427,7 +433,7 @@ var factory = function () {
                 + (confirmed ? ' <span class="whd-pill whd-pill-ok">Planilla confirmada</span>' : '') + '</div>'
                 + '<div class="whd-actions">'
                 + '<button class="whd-btn" data-act="crew" data-key="' + esc(j.key) + '">' + (S.hasCrew(rec) ? 'Tripulación' : 'Cargar acompañantes') + '</button>'
-                + '<button class="whd-btn whd-btn-ghost" data-act="stops" data-key="' + esc(j.key) + '">Paradas y clientes</button>'
+                + (window.CESETTI_SHELL ? '' : '<button class="whd-btn whd-btn-ghost" data-act="stops" data-key="' + esc(j.key) + '">Paradas y clientes</button>')
                 + '<button class="whd-btn whd-btn-ghost" data-act="sheet" data-key="' + esc(j.key) + '">Planilla</button>'
                 + '</div></article>';
         }).join('') + renderMyClaims() + claimButton();
@@ -603,6 +609,220 @@ var factory = function () {
     }
 
     // ------------------------------------------------------------------
+    // Clientes: llegada (check-in), visitas del día y tramos entre clientes
+    // ------------------------------------------------------------------
+    /** Jornadas de hoy en las que estoy: las mías como chofer y las de otros como acompañante. */
+    function todayJornadas() {
+        var day = today();
+        var list = jornadas.filter(function (j) { return j.date === day; }).map(function (j) { return { j: j, role: 'driver' }; });
+        allRecords().forEach(function (r) {
+            if (r.type !== S.CREW || r.date !== day || !me || r.driverId === me.id) { return; }
+            var m = (r.members || []).filter(function (x) { return x.userId === me.id; })[0];
+            if (!m || S.memberStatus(r, m, S.ackIndex(allRecords())) === 'no') { return; }
+            list.push({ role: 'companion', member: m, j: { key: r.key, date: r.date, driverId: r.driverId, deviceId: r.deviceId,
+                deviceIds: r.deviceIds, firstAt: S.toMs(r.identifiedAt), segments: [] } });
+        });
+        return list;
+    }
+
+    function loadClientTimelines() {
+        return Promise.all(todayJornadas().map(function (x) {
+            return loadTimeline(x.j).catch(function () { return null; });
+        }));
+    }
+
+    function myVehicle() {
+        var tj = todayJornadas().sort(function (a, b) { return b.j.firstAt - a.j.firstAt; })[0];
+        var sd = state && S.idOf(state.device);
+        if (sd && sd !== 'NoDeviceId') { return { deviceId: sd, jornadaKey: tj ? tj.j.key : null }; }
+        return tj ? { deviceId: tj.j.deviceId, jornadaKey: tj.j.key } : { deviceId: null, jornadaKey: null };
+    }
+
+    /** Posición del teléfono; si no hay, la del vehículo (DeviceStatusInfo). */
+    function locate() {
+        var geo = (api && api.mobile && api.mobile.geolocation) || (typeof navigator !== 'undefined' && navigator.geolocation);
+        var phone = new Promise(function (resolve) {
+            if (!geo || typeof geo.getCurrentPosition !== 'function') { resolve(null); return; }
+            var t = setTimeout(function () { resolve(null); }, 20000);
+            try {
+                geo.getCurrentPosition(function (p) {
+                    clearTimeout(t);
+                    resolve({ lat: p.coords.latitude, lon: p.coords.longitude, acc: p.coords.accuracy, src: 'phone' });
+                }, function () { clearTimeout(t); resolve(null); }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
+            } catch (e) { clearTimeout(t); resolve(null); }
+        });
+        return phone.then(function (pos) {
+            if (pos && (pos.acc == null || pos.acc <= 200)) { return pos; }
+            var dev = myVehicle().deviceId;
+            if (!dev || !isOnline()) { return pos; }
+            return call('Get', { typeName: 'DeviceStatusInfo', search: { deviceSearch: { id: dev } } }).then(function (l) {
+                var d = (l || [])[0];
+                return d && d.latitude != null ? { lat: d.latitude, lon: d.longitude, acc: null, src: 'vehicle' } : pos;
+            }).catch(function () { return pos; });
+        });
+    }
+
+    function startCheckin() {
+        checkin = { status: 'locating', pos: null };
+        go('checkin');
+        locate().then(function (pos) {
+            if (!checkin) { return; }
+            checkin.pos = pos;
+            checkin.status = pos ? 'ok' : 'none';
+            if (view.name === 'checkin') { render(); }
+        });
+    }
+
+    function clientCatalog() {
+        var seen = {}, out = [];
+        function add(n, z) { var k = String(n || '').trim().toLowerCase(); if (k && !seen[k]) { seen[k] = true; out.push({ name: String(n).trim(), zoneId: z || null }); } }
+        lsGet('recentClients', []).forEach(function (c) { add(c); });
+        (settings.clients || []).forEach(function (c) { add(c); });
+        var types = {};
+        (settings.clientZoneTypeIds || []).forEach(function (t) { types[t] = true; });
+        var base = {};
+        (settings.baseZoneIds || []).forEach(function (id) { base[id] = true; });
+        zones.forEach(function (z) {
+            if (base[z.id]) { return; }
+            if ((settings.clientZoneTypeIds || []).length && !z.types.some(function (t) { return types[t]; })) { return; }
+            add(z.name, z.id);
+        });
+        return out;
+    }
+
+    function renderCheckin() {
+        var c = checkin || { status: 'none' };
+        var q = ($('#whd-search') && $('#whd-search').value || '').trim();
+        var norm = function (t) { return String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, ''); };
+        var nq = norm(q);
+        var pos = c.pos;
+        var point = pos ? { x: pos.lon, y: pos.lat } : null;
+        var near = point ? S.nearbyZones(point, zones, settings).slice(0, 6) : [];
+        var posTxt = c.status === 'locating' ? 'Buscando tu ubicación…'
+            : !pos ? 'No se pudo obtener la ubicación (ni del teléfono ni del vehículo). Se guarda la llegada igual, sin geocerca.'
+                : (pos.src === 'phone' ? 'Ubicación del teléfono' + (pos.acc != null ? ' (±' + Math.round(pos.acc) + ' m)' : '') : 'Ubicación del vehículo (el teléfono no dio posición)');
+        var html = '<button class="whd-back" data-act="home">‹ Volver</button>'
+            + '<h2 class="whd-title">¿En qué cliente estás?</h2>'
+            + '<p class="whd-hint">' + esc(posTxt) + '</p>';
+        if (near.length && !q) {
+            html += '<h3>Cerca de acá</h3><ul class="whd-list whd-pick">' + near.map(function (r) {
+                return '<li><button class="whd-user" data-act="checkinSave" data-name="' + esc(r.zone.name) + '" data-zone="' + esc(r.zone.id) + '"><span>' + esc(r.zone.name)
+                    + '<small>' + (r.inside ? 'Estás dentro de la geocerca' : 'a ' + Math.round(r.dist) + ' m') + '</small></span></button></li>';
+            }).join('') + '</ul>';
+        }
+        html += '<input id="whd-search" class="whd-input" type="search" placeholder="Buscar o escribir el cliente" value="' + esc(q) + '" autocomplete="off">';
+        if (q) {
+            var list = clientCatalog().filter(function (x) { return norm(x.name).indexOf(nq) >= 0; }).slice(0, 40);
+            var exact = list.some(function (x) { return norm(x.name) === nq; });
+            html += '<ul class="whd-list whd-pick">' + list.map(function (x) {
+                return '<li><button class="whd-user" data-act="checkinSave" data-name="' + esc(x.name) + '"' + (x.zoneId ? ' data-zone="' + esc(x.zoneId) + '"' : '') + '><span>' + esc(x.name)
+                    + (x.zoneId ? '<small>con geocerca</small>' : '') + '</span></button></li>';
+            }).join('')
+                + (exact || q.length < 3 ? '' : '<li><button class="whd-user" data-act="checkinSave" data-name="' + esc(q) + '" data-new="1"><span>+ Cliente nuevo: «' + esc(q) + '»'
+                    + '<small>Queda marcado como nuevo para la oficina</small></span></button></li>')
+                + '</ul>';
+        } else {
+            var rec = lsGet('recentClients', []).slice(0, 6);
+            if (rec.length) {
+                html += '<h3>Recientes</h3><ul class="whd-list whd-pick">' + rec.map(function (n) {
+                    return '<li><button class="whd-user" data-act="checkinSave" data-name="' + esc(n) + '"><span>' + esc(n) + '</span></button></li>';
+                }).join('') + '</ul>';
+            }
+        }
+        return html;
+    }
+
+    function saveCheckin(name, zoneId, isNew) {
+        if (!me || !name) { return; }
+        var pos = checkin && checkin.pos;
+        var veh = myVehicle();
+        var point = pos ? { x: pos.lon, y: pos.lat } : null;
+        if (!zoneId && point) {
+            // si eligió por nombre una geocerca que está cerca, se usa esa
+            var n = name.trim().toLowerCase();
+            var hit = S.nearbyZones(point, zones, settings).filter(function (r) { return r.zone.name.trim().toLowerCase() === n; })[0];
+            if (hit) { zoneId = hit.zone.id; }
+        }
+        var visit = S.newVisit(me, { client: name, clientNew: !!isNew, zoneId: zoneId || null, deviceId: veh.deviceId, jornadaKey: veh.jornadaKey,
+            lat: pos ? pos.lat : null, lon: pos ? pos.lon : null, acc: pos ? pos.acc : null, posSource: pos ? pos.src : '', by: by() });
+        var recent = lsGet('recentClients', []).filter(function (c) { return c !== name; });
+        recent.unshift(name);
+        lsSet('recentClients', recent.slice(0, 30));
+        var req = !zoneId && point && S.needsZone(name, point, zones, settings) ? S.newZoneRequest(visit, by()) : null;
+        if (req) { req._dirty = true; records[req.key] = req; }
+        checkin = null;
+        saveLocal(visit, 'checkin', name).then(function () {
+            showMsg('Llegada a ' + name + ' registrada a las ' + S.hhmm(visit.at) + '.' + (req ? ' Se pidió la geocerca: la aprueba la oficina.' : ''), 'ok');
+            render();
+        });
+        go('clients');
+    }
+
+    function renderClientsHome() {
+        var all = allRecords();
+        var html = (window.CESETTI_SHELL ? '' : '<button class="whd-back" data-act="sec" data-key="crew">‹ Tripulación</button>')
+            + '<button class="whd-btn whd-btn-big" data-act="checkin">📍 Llegué a un cliente</button>';
+        var day = today();
+        var mineToday = all.filter(function (r) { return r.type === S.VISIT && r.date === day && me && r.userId === me.id; })
+            .sort(function (a, b) { return S.toMs(b.at) - S.toMs(a.at); });
+        var reqByVisit = {};
+        all.forEach(function (r) { if (r.type === S.ZONEREQ) { reqByVisit[r.visitKey] = r; } });
+        var matched = {};
+        var list = todayJornadas();
+        list.forEach(function (x) {
+            var tl = timelines[x.j.key] || lsGet('tl.' + x.j.key, null);
+            var title = (x.role === 'driver' ? '' : 'Con ' + esc(records[x.j.key] && records[x.j.key].driverName || 'otro chofer') + ' · ') + esc(vehiclesOf(x.j));
+            html += '<article class="whd-card"><h2>' + title + '</h2>';
+            if (!tl || !tl.groups) {
+                html += '<p class="whd-sub">' + (isOnline() ? 'Cargando viajes…' : 'Sin conexión: las visitas se arman cuando haya señal.') + '</p></article>';
+                return;
+            }
+            var rec = S.withVisits(records[x.j.key] || null, tl, all);
+            var visits = S.clientVisits(tl, rec);
+            if (x.role === 'companion') {
+                var mf = S.toMs(x.member.from), mt = x.member.to ? S.toMs(x.member.to) : Infinity;
+                visits = visits.filter(function (v) { return v.to > mf && v.from < mt; });
+            }
+            visits.forEach(function (v) { if (v.checkin) { matched[v.checkin] = true; } });
+            var legs = S.clientLegs(tl, rec);
+            if (!visits.length) { html += '<p class="whd-sub">Todavía sin visitas a clientes hoy.</p>'; }
+            else {
+                html += '<ol class="whd-visits">' + visits.map(function (v, i) {
+                    var leg = i > 0 ? legs[i - 1] : null;
+                    var now = v.final && !v.to ? true : (v.final && Date.now() - v.to < 2 * S.MIN);
+                    return (leg ? '<li class="whd-leg">↓ ' + S.fmtDuration(leg.ms) + ' · ' + S.fmtKm(leg.km) + ' km' + (leg.viaBase ? ' · pasó por la oficina' : '') + '</li>' : '')
+                        + '<li class="whd-visit"><b>' + esc(v.clients.join(', ')) + '</b><span>' + S.hhmm(v.from) + ' – ' + (now ? 'ahora' : S.hhmm(v.to))
+                        + ' · ' + S.fmtDuration(v.to - v.from) + (v.checkin ? ' · llegada registrada' : v.confirmed ? '' : ' · por geocerca') + '</span></li>';
+                }).join('') + '</ol>';
+                var tot = legs.filter(function (l) { return !l.viaBase; });
+                if (tot.length) {
+                    html += '<p class="whd-sub">Entre clientes: ' + S.fmtDuration(tot.reduce(function (s, l) { return s + l.ms; }, 0))
+                        + ' · ' + S.fmtKm(tot.reduce(function (s, l) { return s + l.km; }, 0)) + ' km</p>';
+                }
+            }
+            if (x.role === 'driver') {
+                var miss = S.stopsToAsk(tl).filter(function (s) { var e = S.stopEntry(rec, s.tripId); return !e && !s.zone; }).length;
+                html += '<div class="whd-actions"><button class="whd-btn whd-btn-ghost" data-act="stops" data-key="' + esc(x.j.key) + '">'
+                    + (miss ? 'Completar ' + miss + (miss === 1 ? ' parada sin cliente' : ' paradas sin cliente') : 'Paradas y clientes') + '</button></div>';
+            }
+            html += '</article>';
+        });
+        // llegadas mías que todavía no tienen parada del vehículo (recién llegó o el viaje no subió)
+        var pend = mineToday.filter(function (v) { return !matched[v.key]; });
+        if (pend.length) {
+            html += '<article class="whd-card"><h2>Llegadas registradas</h2><ul class="whd-list">' + pend.slice(0, 5).map(function (v) {
+                var rq = reqByVisit[v.key];
+                return '<li><span>' + esc(v.client) + '<small>' + S.hhmm(v.at) + ' · esperando la parada del vehículo'
+                    + (rq ? ' · geocerca ' + ({ pending: 'pedida', created: 'creada', merged: 'asignada', rejected: 'rechazada' }[rq.status] || '') : '') + '</small></span></li>';
+            }).join('') + '</ul></article>';
+        }
+        if (!list.length && !pend.length) {
+            html += '<div class="whd-empty"><p>Cuando llegues a un cliente, tocá <b>Llegué a un cliente</b>. El tiempo en el cliente termina solo cuando el vehículo se va.</p></div>';
+        }
+        return html;
+    }
+
+    // ------------------------------------------------------------------
     // Vista: paradas
     // ------------------------------------------------------------------
     /**
@@ -632,7 +852,7 @@ var factory = function () {
             return multiCall(reqs.map(S.odometerCall)).then(function (res) { return S.odometerMap(reqs, res); })
                 .catch(function () { return null; });   // sin permiso a StatusData: se usa el odómetro de los viajes
         }).then(function (odo) {
-            var slim = { stops: tl.stops, legs: tl.legs, sheet: tl.sheet, firstStart: tl.firstStart, lastStop: tl.lastStop, odo: odo, at: Date.now() };
+            var slim = { stops: tl.stops, groups: tl.groups, legs: tl.legs, sheet: tl.sheet, firstStart: tl.firstStart, lastStop: tl.lastStop, odo: odo, at: Date.now() };
             timelines[j.key] = slim;
             lsSet('tl.' + j.key, slim);
             return slim;
@@ -733,7 +953,7 @@ var factory = function () {
         if (!tl) {
             return html + '<p class="whd-empty">' + (isOnline() ? 'Cargando viajes…' : 'Sin conexión: las paradas se cargan cuando haya señal.') + '</p>';
         }
-        var rec = recordFor(j);
+        var rec = S.withVisits(recordFor(j), tl, allRecords());
         var ask = S.stopsToAsk(tl);
         if (!ask.length) {
             return html + '<p class="whd-empty">No hay paradas de más de ' + settings.minStopMinutes + ' minutos fuera de la base.</p>';
@@ -813,6 +1033,8 @@ var factory = function () {
         else if (view.name === 'stops') { html = renderStops(); }
         else if (view.name === 'sheet') { html = renderSheet(); }
         else if (view.name === 'claim') { html = renderClaim(); }
+        else if (view.name === 'clients') { html = renderClientsHome(); }
+        else if (view.name === 'checkin') { html = renderCheckin(); }
         else { html = renderHome(); }
         var el = $('#whd-view');
         var search = $('#whd-search');
@@ -826,9 +1048,11 @@ var factory = function () {
     }
 
     function go(name, key) {
+        if (name === 'home' && section === 'clients') { name = 'clients'; }
         view = { name: name, key: key || null };
         picked = {};
         render();
+        if (name === 'clients') { loadClientTimelines().then(function () { if (view.name === 'clients') { render(); } }); }
         if (name === 'stops' || name === 'sheet') {
             var j = findJornada(key);
             if (j) {
@@ -851,7 +1075,9 @@ var factory = function () {
 
     function refresh(full) {
         root && root.classList.add('is-busy');
-        return check({ full: full }).then(function () { render(); }).catch(function (e) {
+        return check({ full: full }).then(function () {
+            return view.name === 'clients' ? loadClientTimelines() : null;
+        }).then(function () { render(); }).catch(function (e) {
             showMsg(errText(e), 'error');
             render();
         }).finally(function () { root && root.classList.remove('is-busy'); });
@@ -896,6 +1122,9 @@ var factory = function () {
             else if (act === 'sheet') { go('sheet', key); }
             else if (act === 'confirmSheet') { confirmSheet(); }
             else if (act === 'ack') { saveAck(key, b.getAttribute('data-status')); }
+            else if (act === 'checkin') { startCheckin(); }
+            else if (act === 'sec') { section = key === 'clients' ? 'clients' : 'crew'; go('home'); }
+            else if (act === 'checkinSave') { saveCheckin(b.getAttribute('data-name'), b.getAttribute('data-zone'), b.getAttribute('data-new') === '1'); }
             else if (act === 'claimStart') { go('claim'); }
             else if (act === 'claimSave') { saveClaim(b.getAttribute('data-user')); }
             else if (act === 'claimOk') { resolveClaim(key, true); }
@@ -961,7 +1190,7 @@ var factory = function () {
             setup(freshApi, freshState);
             root = document.getElementById('whDrive') || root;
             bindEvents();
-            view = { name: 'home', key: null };
+            view = { name: section === 'clients' ? 'clients' : 'home', key: null };
             render();
             startLoop();
             refresh(true);
@@ -975,6 +1204,11 @@ var factory = function () {
         },
         /** Para el contenedor: cosas que esperan una respuesta de esta persona. */
         pendingCount: function () { return pendingActions(); },
+        /** Pestaña del contenedor: 'crew' (Tripulación) o 'clients' (Clientes). */
+        section: function (name) {
+            section = name === 'clients' ? 'clients' : 'crew';
+            go('home');
+        },
         refresh: function () { return refresh(true); }
     };
 };

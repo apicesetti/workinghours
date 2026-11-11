@@ -107,7 +107,9 @@ with sync_playwright() as p:
         page.click('#wh-c-export')
     text = pathlib.Path(dl.value.path()).read_text(encoding='utf-8-sig')
     data = list(csv.reader(io.StringIO(text), delimiter=';'))
-    check(data[0][0] == 'Fecha' and len(data) == 4, 'CSV de visitas (3 filas + encabezado)')
+    vis = data[:data.index([])] if [] in data else data
+    check(vis[0][0] == 'Fecha' and len(vis) == 4, 'CSV de visitas (3 filas + encabezado)')
+    check(['Tramos entre clientes'] in data, 'el CSV incluye los tramos entre clientes')
 
     # --- Planillas (registro guardado con la clave vieja por vehículo: se normaliza a conductor + día)
     page.click('.wh-tab[data-tab=sheets]')

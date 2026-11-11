@@ -18,6 +18,11 @@
  *   Declaración     registro AddInData (type "claim") de quien dice "viajo con <chofer>" sin
  *                   que el chofer lo haya cargado. El chofer la confirma (se suma a su
  *                   tripulación) o la rechaza.
+ *   Llegada         registro AddInData (type "visit"): "llegué a <cliente>" con la posición del
+ *   (check-in)      teléfono (o del vehículo). Se asigna a la parada del vehículo que la contiene;
+ *                   la visita termina sola cuando el vehículo se va (próximo viaje).
+ *   Geocerca pedida registro AddInData (type "zonereq") de 100 × 100 m alrededor de la llegada,
+ *                   cuando el cliente no tiene geocerca cerca. La aprueba el supervisor en MyGeotab.
  *   Horas fuera     desde el inicio del primer viaje hasta el fin del último viaje de la
  *                   jornada, descontando las paradas intermedias dentro de una zona Base.
  *
@@ -36,10 +41,12 @@
     'use strict';
 
     var ADDIN_ID = 'aETg6OS_TD0uqoFHaLelHvg';
-    var VERSION = '1.2.0';
+    var VERSION = '1.3.0';
     var CREW = 'crew';
     var ACK = 'ack';
     var CLAIM = 'claim';
+    var VISIT = 'visit';
+    var ZONEREQ = 'zonereq';
     var SETTINGS = 'settings';
     var UNKNOWN_DRIVER = 'UnknownDriverId';
     var MAX_DETAILS_CHARS = 9500;          // límite de AddInData: 10.000 caracteres
@@ -57,6 +64,10 @@
         shortMoveMinutes: 10,      // …y de hasta estos minutos se toma como dentro del mismo predio
         commute: 'exclude',        // 'exclude': no cuentan los viajes desde/hacia el domicilio · 'include': cuentan
         pollMinutes: 2,            // cada cuánto revisa el add-in de Drive si hubo una identificación
+        newZoneTypeId: '',         // tipo de zona de las geocercas creadas desde las llegadas ('' = sin tipo)
+        newZoneGroupIds: [],       // grupos de esas geocercas (vacío = grupo de la empresa)
+        newZoneSize: 100,          // lado del cuadrado en metros
+        nearZoneMeters: 300,       // una geocerca a menos de esto se sugiere en la llegada
         clients: []                // catálogo de clientes sin geocerca
     };
 
@@ -499,6 +510,8 @@
             var isLast = i === list.length - 1;
             var nextStart = isLast ? toMs(t.nextTripStart) : toMs(list[i + 1].start);
             var to = nextStart != null ? nextStart : stop + parseTimeSpan(t.stopDuration);
+            // último viaje sin el siguiente todavía (el vehículo sigue detenido): la parada sigue abierta
+            if (isLast && nextStart == null && !parseTimeSpan(t.stopDuration)) { to = segEnd; }
             if (isLast) { to = Math.min(to, segEnd); }
             var cls = classifyPoint(t.stopPoint, zones, settings);
             return {
@@ -863,18 +876,166 @@
     /** Intervalos de visita a clientes de la jornada (paradas con cliente cargado o zona de cliente). */
     function clientVisits(timeline, rec) {
         var out = [];
-        (timeline.stops || []).forEach(function (s) {
-            if (s.final || s.base) { return; }
+        // paradas largas + las cortas o la final si tienen una llegada registrada (check-in)
+        var cand = (timeline.stops || []).slice();
+        (timeline.groups || []).forEach(function (g) {
+            var e = stopEntry(rec, g.tripId);
+            if (cand.indexOf(g) < 0 && e && e.checkin) { cand.push(g); }
+        });
+        cand.sort(function (a, b) { return a.from - b.from; });
+        cand.forEach(function (s) {
             var e = stopEntry(rec, s.tripId);
+            if (s.base || (s.final && !(e && e.checkin))) { return; }
             var clients = e && e.clients && e.clients.length ? e.clients : (s.zone ? [s.zone.name] : []);
             if (e && e.noClient) { clients = []; }
             if (!clients.length) { return; }
             out.push({
                 tripId: s.tripId, deviceId: s.deviceId || null, from: s.from, to: s.to, clients: clients,
                 zoneId: (e && e.zoneId) || (s.zone && s.zone.id) || null,
-                confirmed: !!(e && e.clients && e.clients.length), point: s.point
+                confirmed: !!(e && e.clients && e.clients.length), checkin: (e && e.checkin) || null,
+                point: s.point, final: !!s.final
             });
         });
+        return out;
+    }
+
+    // ------------------------------------------------------------------
+    // Llegadas a clientes (check-in) y geocercas pedidas
+    // ------------------------------------------------------------------
+    function newVisit(user, info) {
+        info = info || {};
+        var now = new Date().toISOString();
+        var at = info.at != null ? iso(toMs(info.at)) : now;
+        return {
+            type: VISIT, version: 1, key: 'visit|' + dayKey(at) + '|' + user.id + '|' + toMs(at),
+            date: dayKey(at), userId: user.id, name: user.name || '',
+            client: String(info.client || '').trim().slice(0, 80), clientNew: !!info.clientNew,
+            zoneId: info.zoneId || null, deviceId: info.deviceId || null, jornadaKey: info.jornadaKey || null,
+            lat: info.lat == null ? null : Math.round(info.lat * 1e6) / 1e6,
+            lon: info.lon == null ? null : Math.round(info.lon * 1e6) / 1e6,
+            acc: info.acc == null ? null : Math.round(info.acc), posSource: info.posSource || '',
+            at: at, createdAt: now, createdBy: info.by || '', updatedAt: now, updatedBy: info.by || '', history: []
+        };
+    }
+
+    function newZoneRequest(visit, by) {
+        var now = new Date().toISOString();
+        return {
+            type: ZONEREQ, version: 1, key: 'zonereq|' + visit.key, date: visit.date, visitKey: visit.key,
+            client: visit.client, clientNew: !!visit.clientNew, lat: visit.lat, lon: visit.lon, acc: visit.acc,
+            userId: visit.userId, name: visit.name, at: visit.at,
+            status: 'pending',          // pending | created | merged | rejected
+            zoneId: null, zoneName: null, resolvedAt: null, resolvedBy: null,
+            createdAt: now, createdBy: by || '', updatedAt: now, updatedBy: by || '', history: []
+        };
+    }
+
+    /** Cuadrado de "size" metros de lado centrado en (lat, lon), cerrado (primer punto = último). */
+    function zoneSquare(lat, lon, size) {
+        var h = (size || 100) / 2;
+        var dLat = h / 111320, dLon = h / (111320 * Math.cos(lat * Math.PI / 180));
+        var r = function (v) { return Math.round(v * 1e7) / 1e7; };
+        return [
+            { x: r(lon - dLon), y: r(lat - dLat) }, { x: r(lon + dLon), y: r(lat - dLat) },
+            { x: r(lon + dLon), y: r(lat + dLat) }, { x: r(lon - dLon), y: r(lat + dLat) }, { x: r(lon - dLon), y: r(lat - dLat) }
+        ];
+    }
+
+    /** Entidad Zone para MyGeotab a partir de una geocerca pedida. */
+    function zoneEntity(req, settings, name) {
+        var s = settings || DEFAULT_SETTINGS;
+        var groups = (s.newZoneGroupIds && s.newZoneGroupIds.length ? s.newZoneGroupIds : ['GroupCompanyId']).map(function (id) { return { id: id }; });
+        return {
+            name: String(name || req.client).slice(0, 255),
+            comment: 'Creada desde la llegada de ' + (req.name || '') + ' (' + dayKey(req.at) + ' ' + hhmm(req.at) + ') · Horas de trabajo',
+            points: zoneSquare(req.lat, req.lon, s.newZoneSize || 100),
+            zoneTypes: s.newZoneTypeId ? [{ id: s.newZoneTypeId }] : [],
+            groups: groups, displayed: true, mustIdentifyStops: true,
+            activeFrom: '1986-01-01T00:00:00.000Z', activeTo: '2050-01-01T00:00:00.000Z'
+        };
+    }
+
+    /** Centro aproximado de una zona compacta. */
+    function zoneCenter(z) { return { x: (z.bbox[0] + z.bbox[2]) / 2, y: (z.bbox[1] + z.bbox[3]) / 2 }; }
+
+    /**
+     * Zonas cercanas a un punto (que lo contienen o con su centro a menos de maxM metros), excepto
+     * las zonas base y las gigantes (ciudades, rutas). [{ zone, dist, inside }] de la más cercana.
+     */
+    function nearbyZones(point, zones, settings, maxM) {
+        if (!point || point.x == null || point.y == null) { return []; }
+        var s = settings || DEFAULT_SETTINGS;
+        var base = {};
+        (s.baseZoneIds || []).forEach(function (id) { base[id] = true; });
+        var max = maxM || s.nearZoneMeters || 300;
+        var out = [];
+        (zones || []).forEach(function (z) {
+            if (base[z.id] || !z.pts || z.pts.length < 3) { return; }
+            var c = zoneCenter(z);
+            var diag = distanceMeters({ x: z.bbox[0], y: z.bbox[1] }, { x: z.bbox[2], y: z.bbox[3] });
+            if (diag > 3000) { return; }   // zonas de ciudad, rutas, yacimientos enteros: no identifican un cliente
+            var inside = point.x >= z.bbox[0] && point.x <= z.bbox[2] && point.y >= z.bbox[1] && point.y <= z.bbox[3]
+                && pointInPolygon(point.x, point.y, z.pts);
+            var d = inside ? 0 : distanceMeters(point, c);
+            if (inside || d <= max) { out.push({ zone: z, dist: d, inside: inside }); }
+        });
+        return out.sort(function (a, b) { return a.dist - b.dist; });
+    }
+
+    /** ¿Hace falta pedir geocerca? No, si hay una zona con el mismo nombre cerca o que contiene el punto. */
+    function needsZone(client, point, zones, settings) {
+        if (!point || point.x == null) { return false; }
+        var n = String(client || '').trim().toLowerCase();
+        return !nearbyZones(point, zones, settings).some(function (r) {
+            return r.inside || r.zone.name.trim().toLowerCase() === n;
+        });
+    }
+
+    /**
+     * Asigna las llegadas (check-in) a las paradas de la línea de tiempo: la llegada cae en la parada
+     * del mismo vehículo que la contiene (desde 15 min antes de llegar hasta que se fue). Lo que el
+     * chofer cargó a mano en la parada tiene prioridad. Devuelve una copia del registro.
+     */
+    function withVisits(rec, timeline, visits) {
+        var vs = byType(visits, VISIT).filter(function (v) { return v.client; });
+        if (!vs.length || !timeline || !(timeline.groups || []).length) { return rec; }
+        var out = rec ? clone(rec) : { type: CREW, stops: [], members: [] };
+        if (rec && rec._id) { out._id = rec._id; }
+        out.stops = (out.stops || []).slice();
+        (timeline.groups || []).forEach(function (g) {
+            if (g.base) { return; }
+            var e = stopEntry(out, g.tripId);
+            if (e && ((e.clients && e.clients.length) || e.noClient)) { return; }
+            var v = vs.filter(function (x) {
+                var t = toMs(x.at);
+                return (!x.deviceId || !g.deviceId || x.deviceId === g.deviceId) && t >= g.from - 15 * MIN && t <= g.to + MIN;
+            }).sort(function (a, b) { return toMs(b.at) - toMs(a.at); })[0];
+            if (!v) { return; }
+            if (e) { e.clients = [v.client]; e.zoneId = v.zoneId || null; e.checkin = v.key; }
+            else {
+                out.stops.push({ tripId: g.tripId, from: g.from, to: g.to, zoneId: v.zoneId || null, zoneName: '',
+                    clients: [v.client], note: '', by: v.createdBy || '', at: v.at, checkin: v.key });
+            }
+        });
+        return out;
+    }
+
+    /**
+     * Tramos entre visitas consecutivas a clientes: tiempo (desde que se fue de uno hasta que llegó
+     * al otro) y km. viaBase = pasó por la oficina en el medio (no se suma a los totales).
+     */
+    function clientLegs(timeline, rec) {
+        var visits = clientVisits(timeline, rec);
+        var out = [];
+        for (var i = 1; i < visits.length; i++) {
+            var a = visits[i - 1], b = visits[i];
+            var km = (timeline.legs || []).reduce(function (s, l) {
+                return !l.internal && l.start >= a.to - MIN && l.stop <= b.from + MIN ? s + (l.km || 0) : s;
+            }, 0);
+            var viaBase = (timeline.groups || []).some(function (g) { return g.base && g.from > a.to - MIN && g.to < b.from + MIN; });
+            out.push({ from: a.clients.join(', '), to: b.clients.join(', '), leftAt: a.to, arrivedAt: b.from,
+                ms: Math.max(0, b.from - a.to), km: Math.round(km * 10) / 10, viaBase: viaBase });
+        }
         return out;
     }
 
@@ -1001,6 +1162,7 @@
             depart: sheet.depart, arrive: sheet.arrive, vehicles: vehicles,
             kmTotal: round1(vehicles.reduce(function (s, v) { return s + (v.km || 0); }, 0)),
             kmBetweenClients: round1(kmBetween),
+            clientLegs: clientLegs(timeline, rec),
             visits: visits.map(function (v) { return { client: v.clients.join(', '), from: v.from, to: v.to, confirmed: v.confirmed }; }),
             companions: ((rec && rec.members) || []).map(function (m) {
                 return { userId: m.userId, name: m.name || m.userId, from: toMs(m.from), to: toMs(m.to) };
@@ -1008,6 +1170,7 @@
             solo: !!(rec && rec.solo),
             confirmation: (rec && rec.planilla) || null
         };
+        p.timeBetweenClients = p.clientLegs.reduce(function (s, l) { return l.viaBase ? s : s + l.ms; }, 0);
         p.signature = planillaSignature(p);
         p.changed = !!(p.confirmation && p.confirmation.signature !== p.signature);
         return p;
@@ -1075,7 +1238,7 @@
         var self = this;
         var wanted = {};
         dates.forEach(function (d) { wanted[d] = true; });
-        var keep = function (r) { return r && (r.type === CREW || r.type === ACK || r.type === CLAIM) && wanted[r.date]; };
+        var keep = function (r) { return r && (r.type === CREW || r.type === ACK || r.type === CLAIM || r.type === VISIT || r.type === ZONEREQ) && wanted[r.date]; };
         function viaAll() { return self.all().then(function (recs) { return dedupe(recs.filter(keep)); }); }
         if (!dates.length) { return Promise.resolve([]); }
         if (!self.whereOk) { return viaAll(); }
@@ -1109,6 +1272,18 @@
         }).catch(function () {
             self.whereOk = false;
             return viaAll();
+        });
+    };
+
+    /** Geocercas pedidas sin resolver (de cualquier fecha). */
+    Store.prototype.pendingZoneRequests = function () {
+        var self = this;
+        var p = self.whereOk
+            ? self.call('Get', self.where('type', ZONEREQ)).then(function (list) { return (list || []).map(unwrap); })
+                .catch(function () { self.whereOk = false; return self.all(); })
+            : self.all();
+        return p.then(function (recs) {
+            return dedupe((recs || []).filter(function (r) { return r && r.type === ZONEREQ; }));
         });
     };
 
@@ -1186,7 +1361,7 @@
     }
 
     return {
-        ADDIN_ID: ADDIN_ID, VERSION: VERSION, CREW: CREW, ACK: ACK, CLAIM: CLAIM, SETTINGS: SETTINGS,
+        ADDIN_ID: ADDIN_ID, VERSION: VERSION, CREW: CREW, ACK: ACK, CLAIM: CLAIM, VISIT: VISIT, ZONEREQ: ZONEREQ, SETTINGS: SETTINGS,
         UNKNOWN_DRIVER: UNKNOWN_DRIVER, DEFAULT_SETTINGS: DEFAULT_SETTINGS, MIN: MIN, DAY: DAY,
         esc: esc, clone: clone, toMs: toMs, iso: iso, parseTimeSpan: parseTimeSpan,
         dayKey: dayKey, dayStart: dayStart, dayEnd: dayEnd, daysBetween: daysBetween, addDays: addDays,
@@ -1207,6 +1382,8 @@
         ackKey: ackKey, newAck: newAck, newClaim: newClaim, ackIndex: ackIndex, memberStatus: memberStatus,
         annotateCrews: annotateCrews, invitesFor: invitesFor, claimsFor: claimsFor, claimsBy: claimsBy,
         jornadaForClaim: jornadaForClaim, crewIssues: crewIssues, claimIssues: claimIssues,
+        newVisit: newVisit, newZoneRequest: newZoneRequest, zoneSquare: zoneSquare, zoneEntity: zoneEntity,
+        zoneCenter: zoneCenter, nearbyZones: nearbyZones, needsZone: needsZone, withVisits: withVisits, clientLegs: clientLegs,
         Store: Store, settingsRecord: settingsRecord, csv: csv
     };
 }));
