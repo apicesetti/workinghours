@@ -112,3 +112,10 @@
 .whd-visit { display: flex; flex-direction: column; padding: 8px 10px; border-left: 4px solid var(--whd-accent); background: var(--whd-bg); border-radius: 6px; }
 .whd-visit span { color: var(--whd-muted); font-size: 14px; }
 .whd-leg { color: var(--whd-muted); font-size: 13px; padding: 4px 0 4px 14px; }
+
+/* Mis identificaciones: una fila por vehículo y por identificación (v1.4.2) */
+.whd-idents li { padding: 8px 12px; }
+.whd-ident-day { background: var(--whd-bg); font-size: 13px; font-weight: 600; color: var(--whd-muted); padding: 6px 12px !important; }
+.whd-ident-time { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.whd-idcard { background: var(--whd-card); border: 1px solid var(--whd-line); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+.whd-idcard h2 { font-size: 18px; margin: 0 0 8px; font-weight: 500; }

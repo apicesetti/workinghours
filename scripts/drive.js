@@ -402,6 +402,38 @@ var factory = function () {
         el.hidden = !parts.length;
     }
 
+    /** Nombre corto del vehículo para la lista: patente si la hay. */
+    function plateOf(id) {
+        var full = devices[id] || id;
+        var parts = String(full).split(' · ');
+        return parts.length > 1 ? { plate: parts[1], name: parts[0] } : { plate: full, name: '' };
+    }
+
+    /** Una fila por vehículo y por identificación (tramo), en orden cronológico, de ayer y hoy. */
+    function renderIdentifications() {
+        var day = today(), now = Date.now();
+        var rows = [];
+        jornadas.forEach(function (j) {
+            (j.segments || []).forEach(function (sg) { rows.push({ date: j.date, deviceId: sg.deviceId || j.deviceId, from: sg.from, to: sg.to }); });
+        });
+        if (!rows.length) { return ''; }
+        rows.sort(function (a, b) { return a.from - b.from; });
+        var html = '<article class="whd-idcard"><h2>Mis identificaciones</h2><ul class="whd-list whd-idents">';
+        var lastDate = null;
+        rows.forEach(function (r) {
+            if (r.date !== lastDate) {
+                lastDate = r.date;
+                html += '<li class="whd-ident-day">' + (r.date === day ? 'Hoy' : r.date === S.addDays(day, -1) ? 'Ayer' : r.date.split('-').reverse().join('/')) + '</li>';
+            }
+            var open = r.date === day && r.to >= now - 2 * S.MIN;
+            var p = plateOf(r.deviceId);
+            html += '<li><span><b>' + esc(p.plate) + '</b>' + (p.name ? '<small>' + esc(p.name) + '</small>' : '') + '</span>'
+                + '<span class="whd-ident-time">' + S.hhmm(r.from) + ' – ' + (open ? '<b>ahora</b>' : S.hhmm(r.to))
+                + '<small>' + S.fmtDuration((open ? now : r.to) - r.from) + '</small></span></li>';
+        });
+        return html + '</ul></article>';
+    }
+
     function renderAsks() {
         var html = '';
         myInvites().forEach(function (i) {
@@ -451,7 +483,7 @@ var factory = function () {
                 + '<p>Cuando pases el llavero o la cámara te identifique en un vehículo, te vamos a avisar para que cargues quién viaja con vos.</p></div>'
                 + claimButton();
         }
-        return asks + list.map(function (j) {
+        return asks + renderIdentifications() + list.map(function (j) {
             var rec = records[j.key];
             var names = memberNames(rec);
             var crew;
@@ -462,12 +494,9 @@ var factory = function () {
             if (issues.length) { crew += ' ' + issues.map(function (x) { return '<span class="whd-pill whd-pill-warn">' + esc(x.text) + '</span>'; }).join(' '); }
             var confirmed = rec && rec.planilla;
             var dayLbl = j.date === day ? 'Hoy' : 'Ayer';
-            var lastSeg = (j.segments || [])[j.segments.length - 1];
-            var openNow = j.date === day && lastSeg && lastSeg.to >= Date.now() - 2 * S.MIN;
-            var stateLbl = openNow ? ' · en el vehículo' : (lastSeg && j.date === day ? ' · hasta las ' + S.hhmm(lastSeg.to) : '');
             return '<article class="whd-card">'
                 + '<div class="whd-card-head"><div><h2>' + esc(vehiclesOf(j)) + '</h2>'
-                + '<p class="whd-sub">' + dayLbl + ' · identificado a las ' + S.hhmm(j.firstAt) + stateLbl + '</p></div></div>'
+                + '<p class="whd-sub">' + dayLbl + ' · tripulación y planilla del día</p></div></div>'
                 + '<div class="whd-crew">' + crew
                 + (confirmed ? ' <span class="whd-pill whd-pill-ok">Planilla confirmada</span>' : '') + '</div>'
                 + '<div class="whd-actions">'

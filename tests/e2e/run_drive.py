@@ -50,6 +50,8 @@ with sync_playwright() as p:
     page.wait_for_selector('.whd-card')
     page.wait_for_timeout(300)
     page.screenshot(path=str(OUT / 'drive_1_home.png'), full_page=True)
+    ident = page.locator('.whd-idents li').all_inner_texts()
+    check(len(ident) == 2 and ident[0] == 'Hoy' and 'AD229OE' in ident[1] and '08:24 – ahora' in ident[1], 'mis identificaciones: una fila por vehículo con desde-hasta (%s)' % ident)
     check(page.locator('.whd-card').count() == 1, 'una jornada (OE) para Falcon')
     check('Falta cargar acompañantes' in page.inner_text('.whd-card'), 'jornada marcada como pendiente')
     check(page.inner_text('#whd-who') == 'Mauricio Falcon', 'muestra el chofer logueado')
@@ -184,8 +186,16 @@ with sync_playwright() as p:
     page.wait_for_timeout(800)
     page.click('[data-act=home]') if page.locator('[data-act=home]').count() else None
     page.wait_for_timeout(300)
-    card = page.inner_text('.whd-card')
-    check('hasta las 12:30' in card and 'en el vehículo' not in card, 'después de desvincularse la tarjeta dice hasta qué hora (%s)' % card.replace(chr(10), ' | ')[:120])
+    card = page.inner_text('.whd-idcard')
+    check('08:24 – 12:30' in card and 'ahora' not in card, 'después de desvincularse la identificación termina a esa hora (%s)' % card.replace(chr(10), ' | ')[:120])
+    # se identifica después en otro vehículo (WP): dos filas en orden cronológico
+    page.evaluate("""() => { const n = new Date(); window.__db.DriverChange.push({ type: 'DriverKey', device: { id: 'b3' }, driver: { id: 'b43F' },
+        dateTime: new Date(n.getFullYear(), n.getMonth(), n.getDate(), 13, 5).toISOString() }); window.__addin.focus(window.__api, window.__state); }""")
+    page.wait_for_timeout(900)
+    rows = page.locator('.whd-idents li').all_inner_texts()
+    print('      ', [r.replace(chr(10), ' ') for r in rows])
+    check(len(rows) == 3 and 'AD229OE' in rows[1] and '08:24 – 12:30' in rows[1] and 'AD866WP' in rows[2] and '13:05 – ahora' in rows[2], 'una fila por patente e identificación, en orden')
+    page.screenshot(path=str(OUT / 'drive_7_identificaciones.png'), full_page=True)
     b.close()
 
 print()
