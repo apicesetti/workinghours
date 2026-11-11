@@ -533,3 +533,25 @@ test('llegadas a clientes (check-in), geocercas pedidas y tramos entre clientes 
     assert.deepEqual(ze.groups, [{ id: 'GroupCompanyId' }]);
     assert.equal(ze.points.length, 5);
 });
+
+test('desvincularse (Unknown de tipo "Driver") corta el tramo; apagar el vehículo no (v1.3.2)', () => {
+    // caso real de intcesetti 11/11: Martin seleccionado en IU 09:12, desvinculado 09:37
+    const ch = [
+        { type: 'Driver', dateTime: '2026-11-11T12:12:45.520Z', device: { id: 'b42' }, driver: { id: 'b417' } },
+        { type: 'Driver', dateTime: '2026-11-11T12:37:01.667Z', device: { id: 'b42' }, driver: 'UnknownDriverId' }
+    ];
+    const now = new Date('2026-11-11T13:00:00Z').getTime();
+    let j = S.buildJornadas(ch, { now })[0];
+    assert.equal(j.segments.length, 1);
+    assert.equal(j.segments[0].to, new Date('2026-11-11T12:37:01.667Z').getTime(), 'termina al desvincularse');
+    // el de apagar el vehículo (DriverKey) no corta
+    ch[1].type = 'DriverKey';
+    j = S.buildJornadas(ch, { now })[0];
+    assert.equal(j.segments[0].to, now, 'sigue abierto');
+    // se vuelve a identificar después de desvincularse: nuevo tramo
+    ch[1].type = 'Driver';
+    ch.push({ type: 'DriverKey', dateTime: '2026-11-11T12:50:00.000Z', device: { id: 'b42' }, driver: { id: 'b417' } });
+    j = S.buildJornadas(ch, { now })[0];
+    assert.equal(j.segments.length, 2);
+    assert.equal(j.segments[1].to, now);
+});

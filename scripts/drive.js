@@ -426,9 +426,12 @@ var factory = function () {
             if (issues.length) { crew += ' ' + issues.map(function (x) { return '<span class="whd-pill whd-pill-warn">' + esc(x.text) + '</span>'; }).join(' '); }
             var confirmed = rec && rec.planilla;
             var dayLbl = j.date === day ? 'Hoy' : 'Ayer';
+            var lastSeg = (j.segments || [])[j.segments.length - 1];
+            var openNow = j.date === day && lastSeg && lastSeg.to >= Date.now() - 2 * S.MIN;
+            var stateLbl = openNow ? ' · en el vehículo' : (lastSeg && j.date === day ? ' · hasta las ' + S.hhmm(lastSeg.to) : '');
             return '<article class="whd-card">'
                 + '<div class="whd-card-head"><div><h2>' + esc(vehiclesOf(j)) + '</h2>'
-                + '<p class="whd-sub">' + dayLbl + ' · identificado a las ' + S.hhmm(j.firstAt) + '</p></div></div>'
+                + '<p class="whd-sub">' + dayLbl + ' · identificado a las ' + S.hhmm(j.firstAt) + stateLbl + '</p></div></div>'
                 + '<div class="whd-crew">' + crew
                 + (confirmed ? ' <span class="whd-pill whd-pill-ok">Planilla confirmada</span>' : '') + '</div>'
                 + '<div class="whd-actions">'
@@ -638,11 +641,21 @@ var factory = function () {
         }));
     }
 
+    /** Vehículo en el que estoy ahora: identificado (tramo abierto), si no acompañante, si no el de Drive. */
     function myVehicle() {
-        var tj = todayJornadas().sort(function (a, b) { return b.j.firstAt - a.j.firstAt; })[0];
+        var now = Date.now();
+        var list = todayJornadas();
+        for (var i = 0; i < list.length; i++) {
+            var x = list[i];
+            if (x.role !== 'driver') { continue; }
+            var seg = x.j.segments.filter(function (sg) { return sg.to >= now - 2 * S.MIN; }).pop();
+            if (seg) { return { deviceId: seg.deviceId, jornadaKey: x.j.key }; }
+        }
+        for (var k = 0; k < list.length; k++) {
+            if (list[k].role === 'companion' && !list[k].member.to) { return { deviceId: list[k].j.deviceId, jornadaKey: list[k].j.key }; }
+        }
         var sd = state && S.idOf(state.device);
-        if (sd && sd !== 'NoDeviceId') { return { deviceId: sd, jornadaKey: tj ? tj.j.key : null }; }
-        return tj ? { deviceId: tj.j.deviceId, jornadaKey: tj.j.key } : { deviceId: null, jornadaKey: null };
+        return { deviceId: sd && sd !== 'NoDeviceId' ? sd : null, jornadaKey: null };
     }
 
     /** Posición del teléfono; si no hay, la del vehículo (DeviceStatusInfo). */
