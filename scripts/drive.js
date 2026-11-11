@@ -420,6 +420,8 @@ var factory = function () {
         rows.sort(function (a, b) { return a.from - b.from; });
         var html = '<article class="whd-idcard"><h2>Mis identificaciones</h2><ul class="whd-list whd-idents">';
         var lastDate = null;
+        // cambios de vehículo en el momento (elegir uno y enseguida otro en Drive): menos de 1 min no se lista
+        rows = rows.filter(function (r) { return (r.date === day && r.to >= now - 2 * S.MIN) || r.to - r.from >= S.MIN; });
         rows.forEach(function (r) {
             if (r.date !== lastDate) {
                 lastDate = r.date;
@@ -471,7 +473,7 @@ var factory = function () {
 
     function claimButton() {
         return (window.CESETTI_SHELL ? '' : '<div class="whd-claim"><button class="whd-btn whd-btn-ghost" data-act="sec" data-key="clients">Clientes ›</button></div>')
-            + '<div class="whd-claim"><button class="whd-btn whd-btn-ghost" data-act="claimStart">¿Viajás de acompañante? Viajo con…</button></div>';
+            + (myOpenSegment() ? '' : '<div class="whd-claim"><button class="whd-btn whd-btn-ghost" data-act="claimStart">¿Viajás de acompañante? Viajo con…</button></div>');
     }
 
     function renderHome() {
@@ -612,29 +614,55 @@ var factory = function () {
     // ------------------------------------------------------------------
     // Confirmación de acompañante y "viajo con…"
     // ------------------------------------------------------------------
+    // Quién está identificado ahora en cada vehículo (DeviceStatusInfo): para "Viajo con…"
+    var driving = { at: 0, byDriver: {} };
+    function loadDriving() {
+        if (!isOnline() || Date.now() - driving.at < 60000) { return Promise.resolve(); }
+        return call('Get', { typeName: 'DeviceStatusInfo', search: {}, propertySelector: { fields: ['device', 'driver'], isIncluded: true } })
+            .then(function (list) {
+                var by = {};
+                (list || []).forEach(function (d) {
+                    var drv = S.idOf(d.driver), dev = S.idOf(d.device);
+                    if (drv && drv !== 'UnknownDriverId' && drv !== 'NoDriverId' && dev) { by[drv] = dev; }
+                });
+                driving = { at: Date.now(), byDriver: by };
+                loadDeviceNames(Object.keys(by).map(function (k) { return by[k]; }));
+            }).catch(function () { /* sin permiso: la lista sale sin vehículo */ });
+    }
+
+    /** ¿Estoy identificado ahora como chofer? (tramo abierto hoy) */
+    function myOpenSegment() {
+        var now = Date.now(), day = today(), out = null;
+        jornadas.forEach(function (j) {
+            if (j.date !== day) { return; }
+            (j.segments || []).forEach(function (sg) { if (sg.to >= now - 2 * S.MIN) { out = sg; } });
+        });
+        return out;
+    }
+
     function renderClaim() {
         var filter = ($('#whd-search') && $('#whd-search').value || '').toLowerCase();
         var norm = function (t) { return String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, ''); };
         var f = norm(filter);
-        // primero los choferes con tripulación cargada hoy (se muestra el vehículo)
-        var vehOf = {};
-        allRecords().forEach(function (r) {
-            if (r.type === S.CREW && r.date === today() && r.deviceName) { vehOf[r.driverId] = r.deviceName; }
-        });
+        var vehOf = driving.byDriver;
         var list = operators.filter(function (o) {
             return o.id !== (me && me.id) && (!f || norm(o.name).indexOf(f) >= 0 || (o.employeeNo || '').indexOf(f) >= 0);
         }).sort(function (a, b) {
             return (vehOf[b.id] ? 1 : 0) - (vehOf[a.id] ? 1 : 0) || a.name.localeCompare(b.name, 'es');
         });
+        var mine = myOpenSegment();
         return '<button class="whd-back" data-act="home">‹ Volver</button>'
             + '<h2 class="whd-title">¿Con quién viajás?</h2>'
-            + '<p class="whd-hint">Elegí al chofer. Le llega un aviso para que lo confirme. Se cuenta desde ahora (' + S.hhmm(Date.now()) + ').</p>'
+            + (mine ? '<p class="whd-msg whd-msg-error">Estás identificado como chofer en ' + esc(devices[mine.deviceId] || 'un vehículo')
+                + '. Si alguien viaja con vos, cargalo en <b>Tripulación</b>; "Viajo con…" es para quien va de acompañante.</p>' : '')
+            + '<p class="whd-hint">Elegí al chofer del vehículo en el que vas. Le llega un aviso para que lo confirme. Se cuenta desde ahora (' + S.hhmm(Date.now()) + ').</p>'
             + '<input id="whd-search" class="whd-input" type="search" placeholder="Buscar chofer por nombre o legajo" value="' + esc(filter) + '" autocomplete="off">'
             + (operators.length ? '' : '<p class="whd-hint">No hay lista de choferes en el teléfono. Conectate a internet y tocá ↻.</p>')
             + (f && !list.length ? notListedHint() : '')
             + '<ul class="whd-list whd-pick">' + list.slice(0, 60).map(function (o) {
+                var dv = vehOf[o.id];
                 return '<li><button class="whd-user" data-act="claimSave" data-user="' + esc(o.id) + '"><span>' + esc(o.name)
-                    + (vehOf[o.id] ? '<small>' + esc(vehOf[o.id]) + '</small>' : (o.employeeNo ? '<small>Legajo ' + esc(o.employeeNo) + '</small>' : ''))
+                    + (dv ? '<small>Identificado ahora en ' + esc(devices[dv] || 'un vehículo') + '</small>' : '<small class="whd-dim">Sin identificación en un vehículo ahora</small>')
                     + '</span></button></li>';
             }).join('') + '</ul>';
     }
@@ -666,7 +694,7 @@ var factory = function () {
         claim.resolvedBy = by();
         if (accept) {
             var j = S.jornadaForClaim(jornadas, claim);
-            if (!j) { showMsg('No tenés una identificación ese día: no se puede sumar a ' + claim.name + '.', 'error'); return; }
+            if (!j) { return resolveClaimReversed(claim); }
             var rec = S.clone(recordFor(j));
             var already = (rec.members || []).some(function (m) { return m.userId === claim.userId && !m.to; });
             if (!already) {
@@ -681,6 +709,51 @@ var factory = function () {
         }
         saveLocal(claim, accept ? 'accept' : 'reject', '').then(render);
         render();
+    }
+
+    /**
+     * Confirmó "viaja conmigo" pero yo no estoy identificado en ningún vehículo: si quien lo declaró
+     * sí lo está (era él quien manejaba), quedo yo como acompañante en su tripulación.
+     */
+    function resolveClaimReversed(claim) {
+        if (!isOnline()) { showMsg('Sin conexión: no se puede ver en qué vehículo está ' + claim.name + '. Probá cuando haya señal.', 'error'); return; }
+        var from = S.dayStart(claim.date);
+        showMsg('Buscando la identificación de ' + claim.name + '…', 'info');
+        call('Get', { typeName: 'DriverChange', search: { userSearch: { id: claim.userId }, fromDate: S.iso(from), toDate: S.iso(Date.now()) } }).then(function (mine) {
+            var devs = [];
+            (mine || []).forEach(function (c) { var d = S.idOf(c.device); if (d && devs.indexOf(d) < 0) { devs.push(d); } });
+            if (!devs.length) { return []; }
+            return multiCall(devs.map(function (d) {
+                return ['Get', { typeName: 'DriverChange', search: { deviceSearch: { id: d }, fromDate: S.iso(from), toDate: S.iso(Date.now()) } }];
+            })).then(function (res) { var all = []; (res || []).forEach(function (l) { all = all.concat(l || []); }); return all; });
+        }).then(function (changes) {
+            var theirs = S.buildJornadas(changes, { now: Date.now() }).filter(function (x) { return x.driverId === claim.userId; });
+            var j = S.jornadaForClaim(theirs, claim);
+            return j ? loadDeviceNames(S.deviceIdsOf(j)).then(function () { return j; }) : null;
+        }).then(function (j) {
+            if (!j) {
+                showMsg('Ni vos ni ' + claim.name + ' están identificados en un vehículo: el que maneja tiene que identificarse (llavero, cámara o Drive) y cargar al otro en Tripulación.', 'error');
+                return;
+            }
+            var rec = records[j.key] ? S.clone(records[j.key]) : S.newCrewRecord(j, { driverName: claim.name, deviceName: vehiclesOf(j) });
+            if (records[j.key] && records[j.key]._id) { rec._id = records[j.key]._id; }
+            if (!(rec.members || []).some(function (m) { return m.userId === me.id && !m.to; })) {
+                rec.members = rec.members || [];
+                rec.members.push({ userId: me.id, name: me.name, from: S.iso(Math.max(S.toMs(claim.at), j.firstAt)), to: null,
+                    addedBy: by(), addedAt: S.iso(Date.now()), viaClaim: claim.key });
+                rec.solo = false;
+            }
+            S.addHistory(rec, by(), 'claim', 'invertida: ' + me.name);
+            rec._dirty = true;
+            records[rec.key] = rec;
+            var c2 = S.clone(claim);
+            c2.status = 'accepted'; c2.crewKey = rec.key; c2.reversed = true;
+            c2.resolvedAt = S.iso(Date.now()); c2.resolvedBy = by();
+            return saveLocal(c2, 'accept', 'invertida').then(function () {
+                showMsg('Vos no estás identificado: quedaste como acompañante de ' + claim.name + ' en ' + vehiclesOf(j) + '.', 'ok');
+                render();
+            });
+        }).catch(function (e) { showMsg('No se pudo confirmar: ' + ((e && e.message) || e), 'error'); });
     }
 
     // ------------------------------------------------------------------
@@ -1211,7 +1284,7 @@ var factory = function () {
             else if (act === 'checkin') { startCheckin(); }
             else if (act === 'sec') { section = key === 'clients' ? 'clients' : 'crew'; go('home'); }
             else if (act === 'checkinSave') { saveCheckin(b.getAttribute('data-name'), b.getAttribute('data-zone'), b.getAttribute('data-new') === '1'); }
-            else if (act === 'claimStart') { go('claim'); }
+            else if (act === 'claimStart') { go('claim'); loadDriving().then(function () { if (view.name === 'claim') { render(); } }); }
             else if (act === 'claimSave') { saveClaim(b.getAttribute('data-user')); }
             else if (act === 'claimOk') { resolveClaim(key, true); }
             else if (act === 'claimNo') { resolveClaim(key, false); }

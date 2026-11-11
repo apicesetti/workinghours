@@ -72,13 +72,14 @@ with sync_playwright() as p:
     check(all('_ack' not in m for m in crew['members']), 'la tripulación del chofer no se tocó')
 
     # 3) Coñequeo declara "viajo con Falcon"
+    page.evaluate("window.__dsi = [{ device: { id: 'b4' }, driver: { id: 'b43F' } }]")
     as_user(page, 'bnc@cesetti.com.ar')
     page.click('[data-act=claimStart]')
     page.wait_for_selector('.whd-pick')
     page.fill('#whd-search', 'falc')
     page.wait_for_timeout(100)
     names = page.locator('.whd-pick li').all_inner_texts()
-    check(len(names) == 1 and names[0].startswith('Mauricio Falcon') and 'OE' in names[0], 'buscador de choferes con el vehículo (%s)' % names)
+    check(len(names) == 1 and names[0].startswith('Mauricio Falcon') and 'Identificado ahora en OE' in names[0], 'buscador de choferes con el vehículo (%s)' % names)
     check(page.evaluate("document.activeElement.id") == 'whd-search', 'el buscador no pierde el foco')
     page.screenshot(path=str(OUT / 'comp_2_claim.png'), full_page=True)
     page.click('[data-act=claimSave]')
@@ -117,9 +118,28 @@ with sync_playwright() as p:
     # 6) Drive vuelve a insertar el HTML al reabrir la página: los botones siguen andando
     page.evaluate("""() => { const o = document.getElementById('whDrive'); o.replaceWith(o.cloneNode(true)); window.__addin.focus(window.__api, window.__state); }""")
     page.wait_for_timeout(300)
-    page.click('[data-act=claimStart]')
+    page.click('[data-act=crew]')
     page.wait_for_timeout(200)
-    check(page.is_visible('#whd-search'), 'botones activos después de reinsertar la página')
+    check(page.is_visible('.whd-pick'), 'botones activos después de reinsertar la página')
+    page.click('[data-act=home]')
+    page.wait_for_timeout(200)
+    # 7) Falcon está identificado: no se le ofrece "Viajo con…" (es el chofer)
+    check(page.locator('[data-act=claimStart]').count() == 0, 'el chofer identificado no ve "Viajo con…"')
+    # 8) caso real: el chofer (Falcon) declaró "viajo con Conductor test", que no está identificado.
+    #    Conductor test confirma → queda él como acompañante de Falcon
+    page.evaluate("""() => { const S = WorkingHoursShared; const c = S.newClaim({ id: 'b43F', name: 'Mauricio Falcon' }, { id: 'b2A8', name: 'Conductor test' }, { at: Date.now() - 30 * 60000 });
+        window.__db.AddInData.push({ id: 'aCl', addInId: S.ADDIN_ID, details: S.wrap(c) }); }""")
+    as_user(page, 'conductor_test')
+    check(page.is_visible('text=Mauricio Falcon dice que viaja con vos'), 'Conductor test recibe la declaración')
+    page.click('[data-act=claimOk]')
+    page.wait_for_timeout(800)
+    msg = page.inner_text('#whd-msg')
+    check('quedaste como acompañante de Mauricio Falcon' in msg, 'confirmación invertida (%s)' % msg)
+    crew = recs(page, 'crew')[0]
+    m = [x for x in crew['members'] if x['userId'] == 'b2A8']
+    check(len(m) == 1 and m[0].get('viaClaim'), 'Conductor test quedó en la tripulación de Falcon')
+    cl = [r for r in recs(page, 'claim') if r['userId'] == 'b43F'][0]
+    check(cl['status'] == 'accepted' and cl.get('reversed'), 'declaración aceptada (invertida)')
     b.close()
 
 if errors:

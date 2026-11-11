@@ -41,7 +41,7 @@
     'use strict';
 
     var ADDIN_ID = 'aETg6OS_TD0uqoFHaLelHvg';
-    var VERSION = '1.4.2';
+    var VERSION = '1.4.3';
     var CREW = 'crew';
     var ACK = 'ack';
     var CLAIM = 'claim';
@@ -249,6 +249,12 @@
         return Object.keys(byDriver).map(function (k) {
             var j = byDriver[k];
             j.segments.sort(function (a, b) { return a.from - b.from; });
+            // una persona está en un solo vehículo a la vez: identificarse en otro cierra el anterior
+            for (var i = 0; i < j.segments.length - 1; i++) {
+                var cur = j.segments[i], next = j.segments[i + 1];
+                if (next.deviceId !== cur.deviceId && next.from < cur.to) { cur.to = next.from; }
+            }
+            j.segments = j.segments.filter(function (sg) { return sg.to > sg.from; });
             j.segments.forEach(function (s) { if (j.deviceIds.indexOf(s.deviceId) < 0) { j.deviceIds.push(s.deviceId); } });
             j.deviceId = j.deviceIds[0];
             return j;

@@ -555,3 +555,18 @@ test('desvincularse (Unknown de tipo "Driver") corta el tramo; apagar el vehícu
     assert.equal(j.segments.length, 2);
     assert.equal(j.segments[1].to, now);
 });
+
+test('identificarse en otro vehículo cierra el anterior (v1.4.3)', () => {
+    // caso real intcesetti 11/11: Martin en GV (b7) 10:04, después en IU (b42) 10:26
+    const ch = [
+        { type: 'Driver', dateTime: '2026-11-11T13:04:39.583Z', device: { id: 'b7' }, driver: { id: 'b417' } },
+        { type: 'Driver', dateTime: '2026-11-11T13:26:13.843Z', device: { id: 'b7' }, driver: { id: 'b417' } },
+        { type: 'Driver', dateTime: '2026-11-11T13:26:28.587Z', device: { id: 'b42' }, driver: { id: 'b417' } }
+    ];
+    const now = new Date('2026-11-11T15:30:00Z').getTime();
+    const j = S.buildJornadas(ch, { now })[0];
+    assert.deepEqual(j.segments.map(s => [s.deviceId, new Date(s.from).toISOString(), new Date(s.to).toISOString()]), [
+        ['b7', '2026-11-11T13:04:39.583Z', '2026-11-11T13:26:28.587Z'],
+        ['b42', '2026-11-11T13:26:28.587Z', '2026-11-11T15:30:00.000Z']
+    ]);
+});
