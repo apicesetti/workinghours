@@ -314,9 +314,13 @@ geotab.addin.workingHours = function () {
         if (!it.rec) { return ''; }
         var mark = { no: ' ✗ dijo que no viajaba', pending: ' · sin confirmar' };
         var names = (it.rec.members || []).map(function (m) {
-            return (m.name || uName(m.userId)) + (m.to ? ' (hasta ' + S.hhmm(m.to) + ')' : '') + (mark[m._ack] || '');
+            var sg = S.segmentOfMember(it.jornada, m);
+            var to = m.to ? S.toMs(m.to) : (sg ? sg.to : null);
+            var multi = (it.jornada.segments || []).length > 1;
+            return (m.name || uName(m.userId)) + (multi && m.deviceId ? ' en ' + dName(m.deviceId) : '')
+                + (m.to || (sg && multi) ? ' (' + S.hhmm(m.from) + '–' + S.hhmm(to) + ')' : '') + (mark[m._ack] || '');
         });
-        return names.length ? names.join(', ') : (it.rec.solo ? 'Solo' : '');
+        return names.length ? names.join(', ') : (it.rec.solo || (it.rec.soloSegs || []).length ? 'Solo' : '');
     }
 
     function missingStops(it) {

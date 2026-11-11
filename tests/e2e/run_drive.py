@@ -53,7 +53,7 @@ with sync_playwright() as p:
     ident = page.locator('.whd-idents li').all_inner_texts()
     check(len(ident) == 2 and ident[0] == 'Hoy' and 'AD229OE' in ident[1] and '08:24 – ahora' in ident[1], 'mis identificaciones: una fila por vehículo con desde-hasta (%s)' % ident)
     check(page.locator('.whd-card').count() == 1, 'una jornada (OE) para Falcon')
-    check('Falta cargar acompañantes' in page.inner_text('.whd-card'), 'jornada marcada como pendiente')
+    check('Falta cargar acompañantes' in page.inner_text('.whd-idcard'), 'identificación marcada como pendiente')
     check(page.inner_text('#whd-who') == 'Mauricio Falcon', 'muestra el chofer logueado')
 
     # 3) cargar acompañantes
@@ -80,7 +80,7 @@ with sync_playwright() as p:
     check(db and db[0]['details']['date'] and db[0]['details']['type'] == 'crew', 'envoltorio con type/date/key para whereClause')
     check([m['userId'] for m in rec.get('members', [])] == ['b66', 'b6E'], 'acompañantes guardados')
     check(rec.get('members', [{}])[0].get('from', '').endswith('Z') and rec['members'][0]['from'] == rec['identifiedAt'], 'primera carga: desde la hora de identificación')
-    check('Cristian Vargas' in page.inner_text('.whd-card'), 'la tarjeta muestra la tripulación')
+    check('Cristian Vargas' in page.inner_text('.whd-idcard'), 'la identificación muestra la tripulación')
 
     # 4) paradas
     page.click('[data-act=stops]')
@@ -196,6 +196,21 @@ with sync_playwright() as p:
     print('      ', [r.replace(chr(10), ' ') for r in rows])
     check(len(rows) == 3 and 'AD229OE' in rows[1] and '08:24 – 12:30' in rows[1] and 'AD866WP' in rows[2] and '13:05 – ahora' in rows[2], 'una fila por patente e identificación, en orden')
     page.screenshot(path=str(OUT / 'drive_7_identificaciones.png'), full_page=True)
+    # tripulación por identificación: en WP cargo a Kevin Andrés; OE conserva la suya
+    rows_html = page.locator('.whd-ident')
+    check(rows_html.count() == 2, 'una fila por identificación con su tripulación')
+    page.locator('.whd-ident >> nth=1').locator('[data-act=crew]').click()
+    page.wait_for_selector('.whd-pick')
+    check('AD866WP' in page.inner_text('.whd-title'), 'la carga es sobre WP')
+    page.check('[data-pick=b57]')
+    page.click('[data-act=saveCrew]')
+    page.wait_for_timeout(500)
+    oe = page.inner_text('.whd-ident >> nth=0'); wp = page.inner_text('.whd-ident >> nth=1')
+    check('Kevin Andrés' in wp and 'Kevin Andrés' not in oe and 'Cristian Vargas' in oe and 'Cristian Vargas' not in wp, 'cada vehículo con su tripulación (OE: %s / WP: %s)' % (oe.replace(chr(10), ' '), wp.replace(chr(10), ' ')))
+    crew = [e['details']['rec'] for e in page.evaluate('window.__db.AddInData') if e['details']['type'] == 'crew'][0]
+    ka = [m for m in crew['members'] if m['userId'] == 'b57'][0]
+    check(ka['deviceId'] == 'b3' and ka['to'] is None, 'Kevin queda en WP (b3) mientras dure la identificación')
+    page.screenshot(path=str(OUT / 'drive_8_por_vehiculo.png'), full_page=True)
     b.close()
 
 print()

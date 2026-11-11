@@ -315,7 +315,7 @@ var factory = function () {
     function myClaimsToResolve() { return me ? S.claimsFor(me.id, allRecords()) : []; }
     function pendingActions() {
         var n = myInvites().length + myClaimsToResolve().length;
-        jornadas.forEach(function (j) { if (j.date === today() && !S.hasCrew(records[j.key])) { n++; } });
+        jornadas.forEach(function (j) { if (j.date === today()) { n += S.pendingSegments(j, records[j.key]).length; } });
         return n;
     }
     var APP = window.CESETTI_SHELL ? 'Mi jornada → Tripulación' : 'Horas de trabajo';
@@ -324,11 +324,16 @@ var factory = function () {
         var notified = lsGet('notified', {});
         var day = today();
         jornadas.forEach(function (j) {
-            if (j.date !== day || notified[j.key] || S.hasCrew(records[j.key])) { return; }
-            notified[j.key] = Date.now();
-            var veh = devices[j.deviceId] || 'un vehículo';
-            notify('¿Quién viaja con vos?',
-                'Te identificaste en ' + veh + ' a las ' + S.hhmm(j.firstAt) + '. Abrí ' + APP + ' y cargá tus acompañantes.');
+            if (j.date !== day) { return; }
+            // una pregunta por vehículo en el que me identifiqué (y que dura al menos 1 min)
+            S.pendingSegments(j, records[j.key]).forEach(function (sg) {
+                var k = 'seg|' + j.key + '|' + S.segKey(sg);
+                if (notified[k] || (j.segments.length === 1 && notified[j.key])) { return; }
+                notified[k] = Date.now();
+                var veh = devices[sg.deviceId] || 'un vehículo';
+                notify('¿Quién viaja con vos?',
+                    'Te identificaste en ' + veh + ' a las ' + S.hhmm(sg.from) + '. Abrí ' + APP + ' y cargá tus acompañantes.');
+            });
         });
         // me cargaron como acompañante: confirmar
         myInvites().forEach(function (i) {
@@ -409,29 +414,60 @@ var factory = function () {
         return parts.length > 1 ? { plate: parts[1], name: parts[0] } : { plate: full, name: '' };
     }
 
-    /** Una fila por vehículo y por identificación (tramo), en orden cronológico, de ayer y hoy. */
+    /** Clave de la vista de tripulación de un tramo: <jornada>#<vehículo@desde>. */
+    function crewViewKey(j, sg) { return j.key + '#' + S.segKey(sg); }
+    function findSeg(key) {
+        var parts = String(key || '').split('#');
+        var j = findJornada(parts[0]);
+        if (!j) { return null; }
+        var sg = (j.segments || []).filter(function (x) { return S.segKey(x) === parts[1]; })[0];
+        if (!sg) { sg = S.visibleSegments(j)[0] || j.segments[0]; }   // la identificación cambió: la primera
+        return sg ? { j: j, sg: sg } : null;
+    }
+    function segOpen(j, sg) { return j.date === today() && sg.to >= Date.now() - 2 * S.MIN; }
+
+    /**
+     * Una fila por vehículo y por identificación (tramo), en orden cronológico, de ayer y hoy,
+     * cada una con su tripulación.
+     */
     function renderIdentifications() {
         var day = today(), now = Date.now();
         var rows = [];
         jornadas.forEach(function (j) {
-            (j.segments || []).forEach(function (sg) { rows.push({ date: j.date, deviceId: sg.deviceId || j.deviceId, from: sg.from, to: sg.to }); });
+            S.visibleSegments(j, now).forEach(function (sg) { rows.push({ j: j, sg: sg }); });
         });
         if (!rows.length) { return ''; }
-        rows.sort(function (a, b) { return a.from - b.from; });
+        rows.sort(function (a, b) { return a.sg.from - b.sg.from; });
+        var all = allRecords();
         var html = '<article class="whd-idcard"><h2>Mis identificaciones</h2><ul class="whd-list whd-idents">';
         var lastDate = null;
-        // cambios de vehículo en el momento (elegir uno y enseguida otro en Drive): menos de 1 min no se lista
-        rows = rows.filter(function (r) { return (r.date === day && r.to >= now - 2 * S.MIN) || r.to - r.from >= S.MIN; });
         rows.forEach(function (r) {
-            if (r.date !== lastDate) {
-                lastDate = r.date;
-                html += '<li class="whd-ident-day">' + (r.date === day ? 'Hoy' : r.date === S.addDays(day, -1) ? 'Ayer' : r.date.split('-').reverse().join('/')) + '</li>';
+            var j = r.j, sg = r.sg;
+            if (j.date !== lastDate) {
+                lastDate = j.date;
+                html += '<li class="whd-ident-day">' + (j.date === day ? 'Hoy' : j.date === S.addDays(day, -1) ? 'Ayer' : j.date.split('-').reverse().join('/')) + '</li>';
             }
-            var open = r.date === day && r.to >= now - 2 * S.MIN;
-            var p = plateOf(r.deviceId);
-            html += '<li><span><b>' + esc(p.plate) + '</b>' + (p.name ? '<small>' + esc(p.name) + '</small>' : '') + '</span>'
-                + '<span class="whd-ident-time">' + S.hhmm(r.from) + ' – ' + (open ? '<b>ahora</b>' : S.hhmm(r.to))
-                + '<small>' + S.fmtDuration((open ? now : r.to) - r.from) + '</small></span></li>';
+            var open = segOpen(j, sg);
+            var p = plateOf(sg.deviceId || j.deviceId);
+            var rec = records[j.key];
+            var mem = S.segMembers(rec, sg);
+            var idx = S.ackIndex(all);
+            var crew;
+            if (mem.length) {
+                crew = mem.map(function (m) {
+                    var st = rec ? S.memberStatus(rec, m, idx) : 'pending';
+                    var cls = st === 'no' ? 'whd-pill-warn' : st === 'ok' ? 'whd-pill-ok' : '';
+                    return '<span class="whd-pill ' + cls + '">' + esc(m.name) + (m.to && (!open || S.toMs(m.to) < now) ? ' (hasta ' + S.hhmm(m.to) + ')' : '')
+                        + (st === 'no' ? ' · dijo que no' : st === 'pending' ? ' · sin confirmar' : '') + '</span>';
+                }).join(' ');
+            } else if (S.segHasCrew(rec, sg)) { crew = '<span class="whd-pill">Viajó solo</span>'; }
+            else { crew = '<span class="whd-pill whd-pill-warn">Falta cargar acompañantes</span>'; }
+            html += '<li class="whd-ident"><div class="whd-ident-row"><span><b>' + esc(p.plate) + '</b>' + (p.name ? '<small>' + esc(p.name) + '</small>' : '') + '</span>'
+                + '<span class="whd-ident-time">' + S.hhmm(sg.from) + ' – ' + (open ? '<b>ahora</b>' : S.hhmm(sg.to))
+                + '<small>' + S.fmtDuration((open ? now : sg.to) - sg.from) + '</small></span></div>'
+                + '<div class="whd-ident-crew">' + crew
+                + '<button class="whd-btn whd-btn-sm' + (S.segHasCrew(rec, sg) ? ' whd-btn-ghost' : '') + '" data-act="crew" data-key="' + esc(crewViewKey(j, sg)) + '">'
+                + (S.segHasCrew(rec, sg) ? 'Editar' : 'Cargar') + '</button></div></li>';
         });
         return html + '</ul></article>';
     }
@@ -487,22 +523,16 @@ var factory = function () {
         }
         return asks + renderIdentifications() + list.map(function (j) {
             var rec = records[j.key];
-            var names = memberNames(rec);
-            var crew;
-            if (!S.hasCrew(rec)) { crew = '<span class="whd-pill whd-pill-warn">Falta cargar acompañantes</span>'; }
-            else if (rec.solo && !names.length) { crew = '<span class="whd-pill">Viajó solo</span>'; }
-            else { crew = '<span class="whd-pill whd-pill-ok">' + esc(names.join(', ') || 'Sin acompañantes ahora') + '</span>'; }
-            var issues = rec ? S.crewIssues(rec, allRecords()) : [];
-            if (issues.length) { crew += ' ' + issues.map(function (x) { return '<span class="whd-pill whd-pill-warn">' + esc(x.text) + '</span>'; }).join(' '); }
+            var pend = S.pendingSegments(j, rec).length;
+            var crew = pend ? '<span class="whd-pill whd-pill-warn">' + (pend === 1 ? '1 vehículo sin tripulación' : pend + ' vehículos sin tripulación') + '</span>' : '';
             var confirmed = rec && rec.planilla;
             var dayLbl = j.date === day ? 'Hoy' : 'Ayer';
             return '<article class="whd-card">'
-                + '<div class="whd-card-head"><div><h2>' + esc(vehiclesOf(j)) + '</h2>'
-                + '<p class="whd-sub">' + dayLbl + ' · tripulación y planilla del día</p></div></div>'
+                + '<div class="whd-card-head"><div><h2>Planilla · ' + dayLbl + '</h2>'
+                + '<p class="whd-sub">' + esc(vehiclesOf(j)) + '</p></div></div>'
                 + '<div class="whd-crew">' + crew
                 + (confirmed ? ' <span class="whd-pill whd-pill-ok">Planilla confirmada</span>' : '') + '</div>'
                 + '<div class="whd-actions">'
-                + '<button class="whd-btn" data-act="crew" data-key="' + esc(j.key) + '">' + (S.hasCrew(rec) ? 'Tripulación' : 'Cargar acompañantes') + '</button>'
                 + (window.CESETTI_SHELL ? '' : '<button class="whd-btn whd-btn-ghost" data-act="stops" data-key="' + esc(j.key) + '">Paradas y clientes</button>')
                 + '<button class="whd-btn whd-btn-ghost" data-act="sheet" data-key="' + esc(j.key) + '">Planilla</button>'
                 + '</div></article>';
@@ -522,23 +552,27 @@ var factory = function () {
     }
 
     function renderCrew() {
-        var j = findJornada(view.key);
-        if (!j) { return '<p class="whd-empty">Jornada no encontrada.</p>'; }
+        var x = findSeg(view.key);
+        if (!x) { return '<p class="whd-empty">Identificación no encontrada.</p>'; }
+        var j = x.j, sg = x.sg;
         var rec = recordFor(j);
-        var current = S.activeMembers(rec);
+        var open = segOpen(j, sg);
+        var mem = S.segMembers(rec, sg);
+        var current = open ? mem.filter(function (m) { return !m.to; }) : mem;
         var currentIds = {};
         current.forEach(function (m) { currentIds[m.userId] = true; });
-        var first = !S.hasCrew(rec);
+        var first = !S.segHasCrew(rec, sg) || !mem.length;
         var filter = ($('#whd-search') && $('#whd-search').value || '').toLowerCase();
+        var p = plateOf(sg.deviceId);
 
         var html = '<button class="whd-back" data-act="home">‹ Volver</button>'
-            + '<h2 class="whd-title">' + esc(vehiclesOf(j)) + '</h2>'
-            + '<p class="whd-sub">Identificado a las ' + S.hhmm(j.firstAt) + '</p>';
+            + '<h2 class="whd-title">' + esc(p.plate) + (p.name ? ' · ' + esc(p.name) : '') + '</h2>'
+            + '<p class="whd-sub">' + (j.date === today() ? 'Hoy' : 'Ayer') + ' · ' + S.hhmm(sg.from) + ' – ' + (open ? 'ahora' : S.hhmm(sg.to)) + '</p>';
 
         if (current.length) {
-            html += '<h3>Viajan con vos</h3><ul class="whd-list">' + current.map(function (m) {
-                return '<li><span>' + esc(m.name) + '<small>desde las ' + S.hhmm(m.from) + '</small></span>'
-                    + '<button class="whd-btn whd-btn-sm whd-btn-ghost" data-act="drop" data-user="' + esc(m.userId) + '">Se bajó</button></li>';
+            html += '<h3>' + (open ? 'Viajan con vos' : 'Viajaron con vos') + '</h3><ul class="whd-list">' + current.map(function (m) {
+                return '<li><span>' + esc(m.name) + '<small>desde las ' + S.hhmm(m.from) + (m.to ? ' hasta las ' + S.hhmm(m.to) : '') + '</small></span>'
+                    + '<button class="whd-btn whd-btn-sm whd-btn-ghost" data-act="drop" data-user="' + esc(m.userId) + '">' + (open ? 'Se bajó' : 'Quitar') + '</button></li>';
             }).join('') + '</ul>';
         }
 
@@ -548,9 +582,10 @@ var factory = function () {
         }));
         var nPicked = Object.keys(picked).length;
         html += '<h3>' + (current.length ? 'Sumar acompañantes' : '¿Quién viaja con vos?') + '</h3>'
-            + '<p class="whd-hint">' + (first
-                ? 'Se cuentan desde que te identificaste (' + S.hhmm(j.firstAt) + ').'
-                : 'Se cuentan desde ahora (' + S.hhmm(Date.now()) + ').') + '</p>'
+            + '<p class="whd-hint">' + (!open
+                ? 'Se cuentan todo el tiempo que estuviste en este vehículo (' + S.hhmm(sg.from) + ' – ' + S.hhmm(sg.to) + ').'
+                : first ? 'Se cuentan desde que te identificaste en este vehículo (' + S.hhmm(sg.from) + ') hasta que lo dejes.'
+                    : 'Se cuentan desde ahora (' + S.hhmm(Date.now()) + ') hasta que dejes el vehículo.') + '</p>'
             + '<input id="whd-search" class="whd-input" type="search" placeholder="Buscar por nombre o legajo" value="' + esc(filter) + '" autocomplete="off">'
             + (operators.length ? '' : '<p class="whd-hint">No hay lista de operarios en el teléfono. Conectate a internet y tocá ↻.</p>')
             + (filter && !candidates.length ? notListedHint() : '')
@@ -572,41 +607,58 @@ var factory = function () {
     }
 
     function saveCrew() {
-        var j = findJornada(view.key);
+        var x = findSeg(view.key);
         var ids = Object.keys(picked);
-        if (!j || !ids.length) { return; }
+        if (!x || !ids.length) { return; }
+        var j = x.j, sg = x.sg;
         var rec = S.clone(recordFor(j));
-        var from = S.hasCrew(rec) ? S.iso(Date.now()) : S.iso(j.firstAt);
+        var open = segOpen(j, sg);
+        var first = !S.segMembers(rec, sg).length;
+        var from = !open || first ? S.iso(sg.from) : S.iso(Date.now());
         var freq = lsGet('freq', {});
         ids.forEach(function (id) {
-            var o = operators.filter(function (x) { return x.id === id; })[0] || { id: id, name: id };
-            rec.members.push({ userId: id, name: o.name, from: from, to: null, addedBy: by(), addedAt: S.iso(Date.now()) });
+            var o = operators.filter(function (y) { return y.id === id; })[0] || { id: id, name: id };
+            rec.members.push({ userId: id, name: o.name, from: from, to: open ? null : S.iso(sg.to), deviceId: sg.deviceId,
+                addedBy: by(), addedAt: S.iso(Date.now()) });
             freq[id] = (freq[id] || 0) + 1;
         });
         lsSet('freq', freq);
+        rec.soloSegs = (rec.soloSegs || []).filter(function (k) { return k !== S.segKey(sg); });
         rec.solo = false;
         picked = {};
-        saveLocal(rec, 'members', ids.length + ' acompañante(s)').then(render);
+        saveLocal(rec, 'members', ids.length + ' acompañante(s) en ' + plateOf(sg.deviceId).plate).then(render);
         view = { name: 'home', key: null };
         render();
     }
 
     function saveSolo() {
-        var j = findJornada(view.key);
-        if (!j) { return; }
-        var rec = S.clone(recordFor(j));
-        rec.solo = true;
-        saveLocal(rec, 'solo', '').then(render);
+        var x = findSeg(view.key);
+        if (!x) { return; }
+        var rec = S.clone(recordFor(x.j));
+        rec.soloSegs = (rec.soloSegs || []).concat([S.segKey(x.sg)]);
+        rec.solo = false;
+        saveLocal(rec, 'solo', plateOf(x.sg.deviceId).plate).then(render);
         view = { name: 'home', key: null };
         render();
     }
 
     function dropMember(userId) {
-        var j = findJornada(view.key);
-        if (!j) { return; }
-        var rec = S.clone(recordFor(j));
+        var x = findSeg(view.key);
+        if (!x) { return; }
+        var rec = S.clone(recordFor(x.j));
+        var open = segOpen(x.j, x.sg);
+        var inSeg = S.segMembers(rec, x.sg);
         var name = '';
-        rec.members.forEach(function (m) { if (m.userId === userId && !m.to) { m.to = S.iso(Date.now()); name = m.name; } });
+        if (open) {
+            rec.members.forEach(function (m) { if (m.userId === userId && !m.to && inSeg.indexOf(m) >= 0) { m.to = S.iso(Date.now()); name = m.name; } });
+        } else {
+            // en una identificación que ya terminó, "Quitar" saca a la persona de ese vehículo
+            rec.members = rec.members.filter(function (m) {
+                var drop = m.userId === userId && inSeg.some(function (y) { return y.userId === m.userId && y.from === m.from; });
+                if (drop) { name = m.name; }
+                return !drop;
+            });
+        }
         saveLocal(rec, 'drop', name).then(render);
         render();
     }
@@ -626,7 +678,7 @@ var factory = function () {
                     if (drv && drv !== 'UnknownDriverId' && drv !== 'NoDriverId' && dev) { by[drv] = dev; }
                 });
                 driving = { at: Date.now(), byDriver: by };
-                loadDeviceNames(Object.keys(by).map(function (k) { return by[k]; }));
+                return loadDeviceNames(Object.keys(by).map(function (k) { return by[k]; }));
             }).catch(function () { /* sin permiso: la lista sale sin vehículo */ });
     }
 
@@ -685,6 +737,13 @@ var factory = function () {
         render();
     }
 
+    /** Vehículo del tramo del chofer en un momento dado (o el último anterior). */
+    function segAt(j, t) {
+        var list = (j.segments || []).filter(function (sg) { return sg.from <= t + S.MIN; });
+        var hit = list.filter(function (sg) { return t <= sg.to; })[0] || list[list.length - 1] || (j.segments || [])[0];
+        return hit ? hit.deviceId : null;
+    }
+
     function resolveClaim(key, accept) {
         var c = records[key];
         if (!c) { return; }
@@ -699,7 +758,8 @@ var factory = function () {
             var already = (rec.members || []).some(function (m) { return m.userId === claim.userId && !m.to; });
             if (!already) {
                 var from = Math.max(S.toMs(claim.at), j.firstAt);
-                rec.members.push({ userId: claim.userId, name: claim.name, from: S.iso(from), to: null, addedBy: by(), addedAt: S.iso(Date.now()), viaClaim: claim.key });
+                rec.members.push({ userId: claim.userId, name: claim.name, from: S.iso(from), to: null, deviceId: segAt(j, from),
+                    addedBy: by(), addedAt: S.iso(Date.now()), viaClaim: claim.key });
                 rec.solo = false;
             }
             claim.crewKey = rec.key;
@@ -739,7 +799,8 @@ var factory = function () {
             if (records[j.key] && records[j.key]._id) { rec._id = records[j.key]._id; }
             if (!(rec.members || []).some(function (m) { return m.userId === me.id && !m.to; })) {
                 rec.members = rec.members || [];
-                rec.members.push({ userId: me.id, name: me.name, from: S.iso(Math.max(S.toMs(claim.at), j.firstAt)), to: null,
+                var f2 = Math.max(S.toMs(claim.at), j.firstAt);
+                rec.members.push({ userId: me.id, name: me.name, from: S.iso(f2), to: null, deviceId: segAt(j, f2),
                     addedBy: by(), addedAt: S.iso(Date.now()), viaClaim: claim.key });
                 rec.solo = false;
             }

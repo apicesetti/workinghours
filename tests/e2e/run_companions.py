@@ -55,7 +55,7 @@ with sync_playwright() as p:
     page.click('[data-act=saveCrew]')
     page.wait_for_timeout(400)
     check(len(recs(page, 'crew')) == 1, 'tripulación guardada')
-    check('Cristian Vargas no confirmó' in page.inner_text('.whd-card'), 'el chofer ve que falta la confirmación')
+    check('Cristian Vargas · sin confirmar' in page.inner_text('.whd-idcard'), 'el chofer ve que falta la confirmación')
 
     # 2) el teléfono de Vargas: aviso y confirmación
     as_user(page, 'cv@cesetti.com.ar')
@@ -79,7 +79,7 @@ with sync_playwright() as p:
     page.fill('#whd-search', 'falc')
     page.wait_for_timeout(100)
     names = page.locator('.whd-pick li').all_inner_texts()
-    check(len(names) == 1 and names[0].startswith('Mauricio Falcon') and 'Identificado ahora en OE' in names[0], 'buscador de choferes con el vehículo (%s)' % names)
+    check(len(names) == 1 and names[0].startswith('Mauricio Falcon') and 'Identificado ahora en OE · AD229OE' in names[0], 'buscador de choferes con el vehículo (%s)' % names)
     check(page.evaluate("document.activeElement.id") == 'whd-search', 'el buscador no pierde el foco')
     page.screenshot(path=str(OUT / 'comp_2_claim.png'), full_page=True)
     page.click('[data-act=claimSave]')
@@ -99,8 +99,9 @@ with sync_playwright() as p:
     m = [x for x in crew['members'] if x['userId'] == 'b6E']
     check(len(m) == 1 and m[0].get('viaClaim'), 'Coñequeo sumado a la tripulación por su declaración')
     check(recs(page, 'claim')[0]['status'] == 'accepted', 'declaración aceptada')
-    card = page.inner_text('.whd-card')
-    check('Braian Coñequeo' in card and 'no confirmó' not in card, 'sin pendientes en la tarjeta (%s)' % card.replace('\n', ' | '))
+    card = page.inner_text('.whd-idcard')
+    check('Braian Coñequeo' in card and 'sin confirmar' not in card, 'sin pendientes en la identificación (%s)' % card.replace('\n', ' | '))
+    check(m[0].get('deviceId') == 'b4', 'el acompañante por declaración queda en el vehículo del chofer')
     page.screenshot(path=str(OUT / 'comp_4_done.png'), full_page=True)
 
     # 5) Kevin Andrés: Falcon lo carga y él dice "No viajo"
@@ -113,7 +114,7 @@ with sync_playwright() as p:
     page.click('[data-act=ack][data-status=no]')
     page.wait_for_timeout(400)
     as_user(page, 'mf@cesetti.com.ar')
-    check('Kevin Andrés dijo que no viajaba' in page.inner_text('.whd-card'), 'el chofer ve el rechazo')
+    check('Kevin Andrés · dijo que no' in page.inner_text('.whd-idcard'), 'el chofer ve el rechazo')
 
     # 6) Drive vuelve a insertar el HTML al reabrir la página: los botones siguen andando
     page.evaluate("""() => { const o = document.getElementById('whDrive'); o.replaceWith(o.cloneNode(true)); window.__addin.focus(window.__api, window.__state); }""")

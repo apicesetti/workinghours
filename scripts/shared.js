@@ -41,7 +41,7 @@
     'use strict';
 
     var ADDIN_ID = 'aETg6OS_TD0uqoFHaLelHvg';
-    var VERSION = '1.4.3';
+    var VERSION = '1.5.0';
     var CREW = 'crew';
     var ACK = 'ack';
     var CLAIM = 'claim';
@@ -673,7 +673,49 @@
     }
 
     function hasCrew(rec) {
-        return !!(rec && (rec.solo || (rec.members || []).length));
+        return !!(rec && (rec.solo || (rec.members || []).length || (rec.soloSegs || []).length));
+    }
+
+    // ------------------------------------------------------------------
+    // Tripulación por identificación (v1.5): cada vehículo en el que se identificó el chofer
+    // (tramo) tiene su propia tripulación. Los acompañantes llevan deviceId; su tiempo se corta
+    // cuando termina ese tramo.
+    // ------------------------------------------------------------------
+    function segKey(seg) { return (seg.deviceId || '') + '@' + seg.from; }
+
+    /** Tramos que se muestran: de 1 min o más, o el que está abierto ahora. */
+    function visibleSegments(j, now) {
+        var t = now || Date.now();
+        return ((j && j.segments) || []).filter(function (sg) { return sg.to - sg.from >= MIN || sg.to >= t - 2 * MIN; });
+    }
+
+    /** Tramo del chofer que contiene a un acompañante (por vehículo y hora de subida). */
+    function segmentOfMember(j, m) {
+        if (!j || !m.deviceId) { return null; }
+        var f = toMs(m.from);
+        var list = (j.segments || []).filter(function (sg) { return sg.deviceId === m.deviceId && f >= sg.from - MIN && f <= sg.to + MIN; });
+        return list[0] || null;
+    }
+
+    /** Acompañantes de un tramo (los anteriores a la v1.5, sin vehículo, si se superponen en el tiempo). */
+    function segMembers(rec, seg) {
+        return ((rec && rec.members) || []).filter(function (m) {
+            var f = toMs(m.from), t = m.to ? toMs(m.to) : Infinity;
+            if (m.deviceId) { return m.deviceId === seg.deviceId && f >= seg.from - MIN && f <= seg.to + MIN; }
+            return f < seg.to && t > seg.from;
+        });
+    }
+
+    function segHasCrew(rec, seg) {
+        if (!rec) { return false; }
+        if (segMembers(rec, seg).length) { return true; }
+        if ((rec.soloSegs || []).indexOf(segKey(seg)) >= 0) { return true; }
+        return !!(rec.solo && !(rec.soloSegs || []).length);   // "viajo solo" de antes de la v1.5: toda la jornada
+    }
+
+    /** Tramos visibles sin tripulación cargada. */
+    function pendingSegments(j, rec, now) {
+        return visibleSegments(j, now).filter(function (sg) { return !segHasCrew(rec, sg); });
     }
 
     function stopEntry(rec, tripId) {
@@ -882,7 +924,11 @@
         ((rec && rec.members) || []).forEach(function (m) {
             if (!m.userId || m.userId === jornada.driverId) { return; }
             if (m._ack === 'no') { return; }   // el acompañante dijo "No viajo": no se le cuentan horas
-            out.push({ userId: m.userId, role: 'companion', from: toMs(m.from), to: toMs(m.to) });
+            var to = toMs(m.to);
+            // cargado en un vehículo: se baja cuando el chofer deja ese vehículo
+            var sg = segmentOfMember(jornada, m);
+            if (sg && sg.to && (to == null || to > sg.to)) { to = sg.to; }
+            out.push({ userId: m.userId, role: 'companion', from: toMs(m.from), to: to });
         });
         return out;
     }
@@ -1178,10 +1224,11 @@
             kmBetweenClients: round1(kmBetween),
             clientLegs: clientLegs(timeline, rec),
             visits: visits.map(function (v) { return { client: v.clients.join(', '), from: v.from, to: v.to, confirmed: v.confirmed }; }),
-            companions: ((rec && rec.members) || []).map(function (m) {
-                return { userId: m.userId, name: m.name || m.userId, from: toMs(m.from), to: toMs(m.to) };
+            companions: participants(jornada, rec).filter(function (x) { return x.role === 'companion'; }).map(function (x) {
+                var m = ((rec && rec.members) || []).filter(function (y) { return y.userId === x.userId && toMs(y.from) === x.from; })[0] || {};
+                return { userId: x.userId, name: m.name || x.userId, from: x.from, to: x.to, deviceId: m.deviceId || null };
             }),
-            solo: !!(rec && rec.solo),
+            solo: !!(rec && (rec.solo || (rec.soloSegs || []).length)),
             confirmation: (rec && rec.planilla) || null
         };
         p.timeBetweenClients = p.clientLegs.reduce(function (s, l) { return l.viaBase ? s : s + l.ms; }, 0);
@@ -1425,6 +1472,8 @@
         jornadaForClaim: jornadaForClaim, crewIssues: crewIssues, claimIssues: claimIssues,
         newVisit: newVisit, newZoneRequest: newZoneRequest, zoneSquare: zoneSquare, zoneEntity: zoneEntity,
         zoneCenter: zoneCenter, nearbyZones: nearbyZones, needsZone: needsZone, withVisits: withVisits, clientLegs: clientLegs,
-        Store: Store, settingsRecord: settingsRecord, csv: csv, beforeEpoch: beforeEpoch
+        Store: Store, settingsRecord: settingsRecord, csv: csv, beforeEpoch: beforeEpoch,
+        segKey: segKey, visibleSegments: visibleSegments, segmentOfMember: segmentOfMember, segMembers: segMembers,
+        segHasCrew: segHasCrew, pendingSegments: pendingSegments
     };
 }));

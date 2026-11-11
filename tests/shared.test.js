@@ -570,3 +570,28 @@ test('identificarse en otro vehículo cierra el anterior (v1.4.3)', () => {
         ['b42', '2026-11-11T13:26:28.587Z', '2026-11-11T15:30:00.000Z']
     ]);
 });
+
+test('tripulación por identificación: el acompañante se baja cuando el chofer deja el vehículo (v1.5)', () => {
+    const t = (h, m) => new Date(2026, 10, 11, h, m).getTime();
+    const j = { key: '2026-11-11|d', date: '2026-11-11', driverId: 'd', deviceId: 'IU', firstAt: t(9, 0),
+        segments: [{ deviceId: 'IU', from: t(9, 0), to: t(11, 0) }, { deviceId: 'BV', from: t(13, 0), to: t(14, 0) }] };
+    const rec = S.newCrewRecord(j, {});
+    rec.members = [
+        { userId: 'a', name: 'A', from: new Date(t(9, 0)).toISOString(), to: null, deviceId: 'IU' },   // cargado en IU
+        { userId: 'b', name: 'B', from: new Date(t(13, 0)).toISOString(), to: null, deviceId: 'BV' }   // cargado en BV
+    ];
+    const ps = S.participants(j, rec).filter(p => p.role === 'companion');
+    assert.deepEqual(ps.map(p => [p.userId, p.from, p.to]), [['a', t(9, 0), t(11, 0)], ['b', t(13, 0), t(14, 0)]]);
+    assert.deepEqual(S.segMembers(rec, j.segments[0]).map(m => m.userId), ['a']);
+    assert.deepEqual(S.segMembers(rec, j.segments[1]).map(m => m.userId), ['b']);
+    // "viajo solo" por vehículo
+    const r2 = S.newCrewRecord(j, {});
+    r2.soloSegs = [S.segKey(j.segments[0])];
+    assert.equal(S.segHasCrew(r2, j.segments[0]), true);
+    assert.equal(S.segHasCrew(r2, j.segments[1]), false);
+    assert.deepEqual(S.pendingSegments(j, r2, t(15, 0)).map(s => s.deviceId), ['BV']);
+    // registros anteriores (sin vehículo) siguen funcionando: cuenta para los tramos que se superponen
+    const old = S.newCrewRecord(j, {});
+    old.members = [{ userId: 'c', name: 'C', from: new Date(t(9, 0)).toISOString(), to: null }];
+    assert.equal(S.segHasCrew(old, j.segments[1]), true);
+});

@@ -68,7 +68,7 @@ with sync_playwright() as p:
     phone.wait_for_timeout(800)
     types = phone.evaluate('window.__db.AddInData.map(e => e.details.type)')
     check(types == ['settings'], 'el teléfono descartó lo pendiente anterior al borrado (%s)' % types)
-    check('Falta cargar acompañantes' in phone.inner_text('.whd-card'), 'la jornada de hoy sigue, sin tripulación')
+    check('Falta cargar acompañantes' in phone.inner_text('.whd-idcard'), 'la jornada de hoy sigue, sin tripulación')
     # lo nuevo sí se guarda
     phone.click('[data-act=crew]')
     phone.check('[data-pick=b66]')
