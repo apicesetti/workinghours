@@ -41,7 +41,7 @@
     'use strict';
 
     var ADDIN_ID = 'aETg6OS_TD0uqoFHaLelHvg';
-    var VERSION = '1.3.1';
+    var VERSION = '1.3.2';
     var CREW = 'crew';
     var ACK = 'ack';
     var CLAIM = 'claim';
@@ -272,7 +272,11 @@
             if (t == null || !dev) { return; }
             var drv = idOf(c.driver);
             var who;
-            if (!drv || drv === UNKNOWN_DRIVER) { who = null; }            // no corta
+            // "Conductor desconocido" que alguien cargó a propósito (type "Driver": desvincularse en
+            // Drive, "Me desvinculo" de Mi jornada, la API) corta el tramo. El que genera el equipo
+            // al apagar el vehículo (DriverKey, etc.) no corta.
+            if ((!drv || drv === UNKNOWN_DRIVER) && c.type === 'Driver') { who = '#end'; }
+            else if (!drv || drv === UNKNOWN_DRIVER) { who = null; }      // no corta
             else if (isExcluded(drv)) { who = '#other'; }                  // corta, sin jornada
             else { who = drv; }
             var k = dayKey(t) + '|' + dev;
@@ -288,7 +292,9 @@
             var cur = null;
             evts.forEach(function (e) {
                 if (cur && cur.who === e.who) { return; }
+                if (!cur && e.who === '#end') { return; }
                 if (cur) { cur.to = e.t; }
+                if (e.who === '#end') { cur = null; return; }
                 cur = { who: e.who, from: e.t, to: null };
                 if (e.who !== '#other') {
                     var jk = date + '|' + dev + '|' + e.who;
