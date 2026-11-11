@@ -429,3 +429,45 @@ test('planilla: km entre clientes, visitas, acompañantes y reconfirmación si c
     rec.stops[0].clients = ['Otro cliente'];
     assert.equal(S.buildPlanilla(j, tl, rec).changed, true, 'si cambia un cliente hay que reconfirmar');
 });
+
+test('confirmación del acompañante y declaración "viajo con…" (v1.2)', () => {
+    const j = { key: '2026-10-28|b43F', date: '2026-10-28', driverId: 'b43F', deviceId: 'b4', firstAt: NOW - 8 * H,
+        segments: [{ deviceId: 'b4', from: NOW - 8 * H, to: NOW - 2 * H }] };
+    const crew = S.newCrewRecord(j, { driverName: 'Mauricio Falcon', deviceName: 'OE' });
+    crew.members = [
+        { userId: 'b66', name: 'Cristian Vargas', from: S.iso(NOW - 8 * H), to: null },
+        { userId: 'b6E', name: 'Braian Coñequeo', from: S.iso(NOW - 8 * H), to: null },
+        { userId: 'b57', name: 'Kevin Andrés', from: S.iso(NOW - 6 * H), to: null, viaClaim: 'claim|x' }
+    ];
+    // sin respuestas: Vargas y Coñequeo tienen invitación; Andrés se sumó por su declaración
+    let recs = [crew];
+    assert.deepEqual(S.invitesFor('b66', recs).map(i => i.crew.key), [crew.key]);
+    assert.equal(S.invitesFor('b57', recs).length, 0, 'por declaración propia ya cuenta como confirmado');
+    assert.equal(S.invitesFor('b43F', recs).length, 0, 'el chofer no se invita a sí mismo');
+    assert.deepEqual(S.crewIssues(crew, recs).map(x => x.kind), ['pending', 'pending']);
+    // Vargas confirma, Coñequeo dice que no
+    const a1 = S.newAck(crew, { id: 'b66', name: 'Cristian Vargas' }, 'ok', 'cv');
+    const a2 = S.newAck(crew, { id: 'b6E', name: 'Braian Coñequeo' }, 'no', 'bnc');
+    assert.equal(a1.key, 'ack|' + crew.key + '|b66');
+    assert.equal(a1.date, crew.date, 'se filtra por la misma fecha que la tripulación');
+    recs = [crew, a1, a2];
+    assert.equal(S.invitesFor('b66', recs).length, 0);
+    assert.deepEqual(S.crewIssues(crew, recs).map(x => x.kind + ':' + x.userId), ['no:b6E']);
+    // horas: quien dijo "No viajo" no suma
+    const c2 = S.clone(crew);
+    S.annotateCrews([c2], recs);
+    assert.deepEqual(S.participants(j, c2).map(p => p.userId), ['b43F', 'b66', 'b57']);
+    // m._ack no se guarda
+    assert.equal(S.strip(c2).members[0]._ack, undefined);
+    // declaración "viajo con Falcon" de Canales
+    const cl = S.newClaim({ id: 'b7E', name: 'Mariano Canales' }, { id: 'b43F', name: 'Mauricio Falcon' }, { at: NOW - 5 * H });
+    assert.equal(cl.status, 'pending');
+    assert.equal(cl.date, '2026-10-28');
+    assert.deepEqual(S.claimsFor('b43F', [cl]).map(c => c.userId), ['b7E']);
+    assert.equal(S.jornadaForClaim([j], cl).key, j.key, 'la jornada que contiene la hora');
+    assert.equal(S.jornadaForClaim([j], Object.assign({}, cl, { date: '2026-10-27' })), null, 'otro día: sin jornada');
+    assert.deepEqual(S.claimIssues(j, [cl]).map(x => x.kind), ['claim']);
+    cl.status = 'accepted';
+    assert.equal(S.claimsFor('b43F', [cl]).length, 0);
+    assert.equal(S.claimIssues(j, [cl]).length, 0);
+});

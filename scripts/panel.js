@@ -136,15 +136,18 @@ geotab.addin.workingHours = function () {
                         propertySelector: { fields: ['id', 'device', 'driver', 'start', 'stop', 'stopDuration', 'stopPoint', 'nextTripStart', 'drivingDuration', 'distance'], isIncluded: true }
                     }]
                 ]),
-                store.crewByDates(days)
+                store.recordsByDates(days)
             ]);
         }).then(function (r) {
             var changes = r[0][0] || [], trips = r[0][1] || [], recs = r[1] || [];
             var ex = excludedSet();
             var jornadas = S.buildJornadas(changes, { now: Date.now(), isExcluded: function (id) { return !!ex[id]; } })
                 .filter(function (j) { return j.date >= from && j.date <= to; });
+            // confirmaciones del acompañante y declaraciones "viajo con…": marcan a cada acompañante
+            // (m._ack) para que quien dijo "No viajo" no sume horas, y arman las discrepancias
+            S.annotateCrews(recs, recs);
             var byKey = {};
-            recs.forEach(function (rec) { byKey[rec.key] = rec; });
+            recs.forEach(function (rec) { if (rec.type === S.CREW) { byKey[rec.key] = rec; } });
             var tripsByDevice = {};
             trips.forEach(function (t) { var d = S.idOf(t.device); (tripsByDevice[d] = tripsByDevice[d] || []).push(t); });
             items = jornadas.map(function (j) {
@@ -154,6 +157,7 @@ geotab.addin.workingHours = function () {
                     jornada: j,
                     timeline: S.buildTimeline(j, jt, { zones: zones, settings: settings }),
                     rec: byKey[j.key] || null,
+                    issues: (byKey[j.key] ? S.crewIssues(byKey[j.key], recs) : []).concat(S.claimIssues(j, recs)),
                     odo: null
                 };
             });
@@ -164,7 +168,9 @@ geotab.addin.workingHours = function () {
             setBusy(false);
             renderAll();
             var pend = items.filter(function (it) { return !S.hasCrew(it.rec); }).length;
-            showMsg(items.length + ' jornadas en el período' + (pend ? ' · ' + pend + ' sin tripulación cargada' : '') + '.', 'ok');
+            var dis = items.filter(function (it) { return it.issues && it.issues.some(function (x) { return x.kind !== 'pending'; }); }).length;
+            showMsg(items.length + ' jornadas en el período' + (pend ? ' · ' + pend + ' sin tripulación cargada' : '')
+                + (dis ? ' · ' + dis + ' con diferencias entre chofer y acompañantes' : '') + '.', 'ok');
         }).catch(function (e) {
             setBusy(false);
             showMsg('No se pudo cargar: ' + errText(e), 'error');
@@ -302,8 +308,9 @@ geotab.addin.workingHours = function () {
     // ------------------------------------------------------------------
     function crewText(it) {
         if (!it.rec) { return ''; }
+        var mark = { no: ' ✗ dijo que no viajaba', pending: ' · sin confirmar' };
         var names = (it.rec.members || []).map(function (m) {
-            return (m.name || uName(m.userId)) + (m.to ? ' (hasta ' + S.hhmm(m.to) + ')' : '');
+            return (m.name || uName(m.userId)) + (m.to ? ' (hasta ' + S.hhmm(m.to) + ')' : '') + (mark[m._ack] || '');
         });
         return names.length ? names.join(', ') : (it.rec.solo ? 'Solo' : '');
     }
@@ -338,7 +345,10 @@ geotab.addin.workingHours = function () {
                 + '<td>' + fmtDate(j.date) + '</td>'
                 + '<td>' + esc(vehiclesOf(j)) + '</td>'
                 + '<td>' + esc(uName(j.driverId)) + '</td>'
-                + '<td class="wh-wrap">' + esc(crewText(it)) + '</td>'
+                + '<td class="wh-wrap">' + esc(crewText(it))
+                + (it.issues || []).filter(function (x) { return x.kind !== 'pending'; }).map(function (x) {
+                    return '<br><span class="wh-badge wh-badge-warn">' + esc(x.text) + '</span>';
+                }).join('') + '</td>'
                 + '<td>' + S.hhmm(tl.firstStart) + '</td>'
                 + '<td>' + S.hhmm(tl.lastStop) + '</td>'
                 + '<td class="wh-num">' + (tl.firstStart == null ? '<span class="wh-muted">sin viajes</span>' : S.fmtDuration(S.total(tl.outside))) + '</td>'
