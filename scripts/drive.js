@@ -232,9 +232,9 @@ var factory = function () {
                 return all;
             }).catch(function () { return mine || []; });
         }).then(function (changes) {
-            jornadas = S.buildJornadas(changes, { now: Date.now() }).filter(function (j) {
-                return j.driverId === me.id && (!settings.sinceDate || j.date >= settings.sinceDate);
-            });
+            jornadas = S.applyEpoch(S.buildJornadas(changes, { now: Date.now() }).filter(function (j) {
+                return j.driverId === me.id;
+            }), settings);
             lsSet('jornadas', jornadas);
             return store.recordsByDates([S.addDays(today(), -1), today()]);
         }).then(function (recs) {

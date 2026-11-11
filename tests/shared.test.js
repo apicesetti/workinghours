@@ -595,3 +595,15 @@ test('tripulación por identificación: el acompañante se baja cuando el chofer
     old.members = [{ userId: 'c', name: 'C', from: new Date(t(9, 0)).toISOString(), to: null }];
     assert.equal(S.segHasCrew(old, j.segments[1]), true);
 });
+
+test('después de "Empezar de cero" no se muestran identificaciones anteriores (v1.5.1)', () => {
+    const t = (h, m) => new Date(2026, 10, 11, h, m).getTime();
+    const js = [{ key: 'k', date: '2026-11-11', driverId: 'd', firstAt: t(9, 0),
+        segments: [{ deviceId: 'IU', from: t(9, 0), to: t(9, 37) }, { deviceId: 'BV', from: t(13, 53), to: t(15, 30) }] }];
+    const out = S.applyEpoch(js, { dataEpoch: new Date(t(15, 0)).toISOString(), sinceDate: '2026-11-11' });
+    assert.equal(out.length, 1);
+    assert.deepEqual(out[0].segments.map(s => [s.deviceId, s.from]), [['BV', t(15, 0)]]);
+    assert.equal(out[0].firstAt, t(15, 0));
+    assert.equal(S.applyEpoch(js, { dataEpoch: new Date(t(16, 0)).toISOString() }).length, 0);
+    assert.equal(js[0].segments.length, 2, 'no modifica el original');
+});
