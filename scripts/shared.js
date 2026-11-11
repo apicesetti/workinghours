@@ -41,7 +41,7 @@
     'use strict';
 
     var ADDIN_ID = 'aETg6OS_TD0uqoFHaLelHvg';
-    var VERSION = '1.5.0';
+    var VERSION = '1.5.1';
     var CREW = 'crew';
     var ACK = 'ack';
     var CLAIM = 'claim';
@@ -1423,6 +1423,26 @@
         });
     };
 
+    /**
+     * Después de "Empezar de cero" no se muestran identificaciones anteriores al borrado: los tramos
+     * que terminaron antes se descartan y el que sigue abierto empieza en ese momento. Los cambios
+     * de conductor de MyGeotab no se tocan.
+     */
+    function applyEpoch(jornadas, settings) {
+        var ep = settings && settings.dataEpoch ? toMs(settings.dataEpoch) : null;
+        var since = settings && settings.sinceDate;
+        return (jornadas || []).filter(function (j) { return !since || j.date >= since; }).map(function (j) {
+            if (!ep) { return j; }
+            var segs = (j.segments || []).filter(function (sg) { return sg.to > ep; }).map(function (sg) {
+                return sg.from < ep ? Object.assign({}, sg, { from: ep }) : sg;
+            });
+            if (!segs.length) { return null; }
+            var c = Object.assign({}, j, { segments: segs });
+            c.firstAt = segs[0].from;
+            return c;
+        }).filter(Boolean);
+    }
+
     /** ¿El registro local es anterior al último borrado? (no se vuelve a subir) */
     function beforeEpoch(rec, epoch) {
         if (!epoch || !rec) { return false; }
@@ -1472,7 +1492,7 @@
         jornadaForClaim: jornadaForClaim, crewIssues: crewIssues, claimIssues: claimIssues,
         newVisit: newVisit, newZoneRequest: newZoneRequest, zoneSquare: zoneSquare, zoneEntity: zoneEntity,
         zoneCenter: zoneCenter, nearbyZones: nearbyZones, needsZone: needsZone, withVisits: withVisits, clientLegs: clientLegs,
-        Store: Store, settingsRecord: settingsRecord, csv: csv, beforeEpoch: beforeEpoch,
+        Store: Store, settingsRecord: settingsRecord, csv: csv, beforeEpoch: beforeEpoch, applyEpoch: applyEpoch,
         segKey: segKey, visibleSegments: visibleSegments, segmentOfMember: segmentOfMember, segMembers: segMembers,
         segHasCrew: segHasCrew, pendingSegments: pendingSegments
     };

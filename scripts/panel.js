@@ -142,7 +142,8 @@ geotab.addin.workingHours = function () {
             var changes = r[0][0] || [], trips = r[0][1] || [], recs = r[1] || [];
             var ex = excludedSet();
             var jornadas = S.buildJornadas(changes, { now: Date.now(), isExcluded: function (id) { return !!ex[id]; } })
-                .filter(function (j) { return j.date >= from && j.date <= to && (!settings.sinceDate || j.date >= settings.sinceDate); });
+                .filter(function (j) { return j.date >= from && j.date <= to; });
+            jornadas = S.applyEpoch(jornadas, settings);
             // confirmaciones del acompañante y declaraciones "viajo con…": marcan a cada acompañante
             // (m._ack) para que quien dijo "No viajo" no sume horas, y arman las discrepancias
             S.annotateCrews(recs, recs);
@@ -771,7 +772,7 @@ geotab.addin.workingHours = function () {
             + '<div class="wh-card wh-card-danger"><h3>Empezar de cero</h3>'
             + '<p class="wh-muted">Borra todos los registros: tripulaciones, confirmaciones, declaraciones "viajo con…", llegadas a clientes, geocercas pedidas y planillas confirmadas. '
             + '<b>La configuración se conserva.</b> Las geocercas ya creadas en MyGeotab no se tocan. No se puede deshacer.</p>'
-            + '<p class="wh-muted">Las jornadas anteriores a hoy dejan de mostrarse, y los teléfonos descartan lo que tengan guardado sin sincronizar.</p>'
+            + '<p class="wh-muted">Las identificaciones anteriores al borrado dejan de mostrarse (los cambios de conductor de MyGeotab no se tocan), y los teléfonos descartan lo que tengan guardado sin sincronizar.</p>'
             + (settings.dataEpoch ? '<p class="wh-muted">Último borrado: ' + esc(new Date(settings.dataEpoch).toLocaleString('es-AR')) + (settings.sinceDate ? ' · se muestra desde el ' + fmtDate(settings.sinceDate) : '') + '.</p>' : '')
             + '<label class="wh-field">Escribí BORRAR para confirmar <input type="text" id="wh-s-reset-txt" autocomplete="off"></label>'
             + '<button class="wh-btn wh-btn-danger" id="wh-s-reset" disabled>Borrar todos los registros</button></div>'
