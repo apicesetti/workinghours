@@ -133,7 +133,26 @@ var factory = function () {
     }
 
     function loadSettings() {
-        return store.settings().then(function (s) { settings = s; lsSet('settings', s); });
+        return store.settings().then(function (s) {
+            settings = s;
+            lsSet('settings', s);
+            applyEpoch();
+        });
+    }
+
+    /** Después de "Borrar registros" en MyGeotab: se descarta lo local anterior (no se vuelve a subir). */
+    function applyEpoch() {
+        var ep = settings.dataEpoch || '';
+        if (!ep || lsGet('epoch', '') === ep) { return; }
+        Object.keys(records).forEach(function (k) { if (S.beforeEpoch(records[k], ep)) { delete records[k]; } });
+        lsSet('records', records);
+        lsSet('notified', {});
+        lsSet('syncError', null);
+        Object.keys(timelines).forEach(function (k) { delete timelines[k]; });
+        try {
+            Object.keys(localStorage).forEach(function (k) { if (k.indexOf(LS + 'tl.') === 0) { localStorage.removeItem(k); } });
+        } catch (e) { /* sin almacenamiento */ }
+        lsSet('epoch', ep);
     }
 
     function loadOperators(force) {
@@ -190,7 +209,8 @@ var factory = function () {
         var from = S.dayStart(S.addDays(today(), -1));
         checking = loadMe().then(function () {
             if (!me) { throw new Error('No se pudo identificar al usuario de Drive.'); }
-            var first = opts.full ? Promise.all([loadSettings(), flush()]) : flush();
+            // primero la configuración: si hubo un borrado, lo local viejo no se vuelve a subir
+            var first = opts.full ? loadSettings().catch(function () {}).then(flush) : flush();
             return first;
         }).then(function () {
             return call('Get', {
@@ -198,7 +218,9 @@ var factory = function () {
                 search: { userSearch: { id: me.id }, fromDate: S.iso(from), toDate: S.iso(Date.now()) }
             });
         }).then(function (changes) {
-            jornadas = S.buildJornadas(changes, { now: Date.now() }).filter(function (j) { return j.driverId === me.id; });
+            jornadas = S.buildJornadas(changes, { now: Date.now() }).filter(function (j) {
+                return j.driverId === me.id && (!settings.sinceDate || j.date >= settings.sinceDate);
+            });
             lsSet('jornadas', jornadas);
             return store.recordsByDates([S.addDays(today(), -1), today()]);
         }).then(function (recs) {

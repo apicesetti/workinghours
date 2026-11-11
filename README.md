@@ -1,4 +1,4 @@
-# Horas de trabajo — Add-ins Geotab Drive + MyGeotab · v1.3
+# Horas de trabajo — Add-ins Geotab Drive + MyGeotab · v1.4
 
 Seguimiento de las **horas fuera de la oficina de todos los operarios**, aunque no manejen, y de los **clientes visitados** en cada parada.
 
@@ -108,6 +108,10 @@ recs = api.get("AddInData", search={"addInId": "aETg6OS_TD0uqoFHaLelHvg",
 tripulaciones = [r["details"] for r in recs if r["details"]["type"] == "crew"]
 ```
 
+## Empezar de cero
+
+*Configuración → Empezar de cero* (hay que escribir BORRAR) elimina todos los registros del add-in —tripulaciones, confirmaciones, declaraciones, llegadas, geocercas pedidas y planillas confirmadas— y **conserva la configuración**. Las geocercas ya creadas en MyGeotab no se tocan. Desde ese día no se muestran jornadas anteriores (`sinceDate`), y los teléfonos descartan lo que tenían sin sincronizar de antes del borrado (`dataEpoch`), para que no se vuelva a subir. Se necesita permiso para borrar datos de add-ins.
+
 ## Offline
 
 Todo lo que carga el chofer se guarda primero en el teléfono y se sincroniza cuando vuelve la señal. La sincronización se dispara al reabrir Drive, en el ciclo de revisión y al cerrar sesión (`onShutdown`, 15 s). Si el registro fue borrado en el servidor, se recrea. Las paradas necesitan conexión para leer los viajes; el resto funciona sin señal.
@@ -116,7 +120,7 @@ Todo lo que carga el chofer se guarda primero en el teléfono y se sincroniza cu
 
 ```bash
 TZ=America/Argentina/Buenos_Aires node --test tests/*.test.js   # lógica (21 tests)
-cd tests/e2e && python3 run_drive.py && python3 run_panel.py && python3 run_sync_error.py && python3 run_companions.py && python3 run_clients.py   # navegador (requiere playwright)
+cd tests/e2e && python3 run_drive.py && python3 run_panel.py && python3 run_sync_error.py && python3 run_companions.py && python3 run_clients.py && python3 run_reset.py   # navegador (requiere playwright)
 ```
 
 Los tests de lógica usan datos reales de intcesetti del 28/10/2026: una llave de mantenimiento que corta la jornada de Canales en WP, y los viajes y odómetros de Falcon en OE para la planilla. Los recorridos en navegador fijan el reloj a las 18:30 para no depender de la hora en que se corren.

@@ -41,7 +41,7 @@
     'use strict';
 
     var ADDIN_ID = 'aETg6OS_TD0uqoFHaLelHvg';
-    var VERSION = '1.3.2';
+    var VERSION = '1.4.0';
     var CREW = 'crew';
     var ACK = 'ack';
     var CLAIM = 'claim';
@@ -68,6 +68,8 @@
         newZoneGroupIds: [],       // grupos de esas geocercas (vacío = grupo de la empresa)
         newZoneSize: 100,          // lado del cuadrado en metros
         nearZoneMeters: 300,       // una geocerca a menos de esto se sugiere en la llegada
+        sinceDate: '',             // AAAA-MM-DD: no se muestran jornadas anteriores (registros borrados)
+        dataEpoch: '',             // ISO: momento del último borrado; los teléfonos descartan lo local anterior
         clients: []                // catálogo de clientes sin geocerca
     };
 
@@ -1347,6 +1349,33 @@
         });
     };
 
+    /**
+     * Borra todos los registros del add-in (tripulaciones, confirmaciones, declaraciones, llegadas y
+     * geocercas pedidas) y deja solo la configuración. Devuelve la cantidad borrada.
+     */
+    Store.prototype.removeAllRecords = function () {
+        var self = this;
+        return self.call('Get', { typeName: 'AddInData', search: { addInId: ADDIN_ID } }).then(function (list) {
+            var ids = (list || []).filter(function (e) {
+                var r = unwrap(e);
+                return !(r && r.type === SETTINGS);
+            }).map(function (e) { return e.id; });
+            var chunks = [];
+            for (var i = 0; i < ids.length; i += 100) { chunks.push(ids.slice(i, i + 100)); }
+            return chunks.reduce(function (p, ch) {
+                return p.then(function () {
+                    return self.multiCall(ch.map(function (id) { return ['Remove', { typeName: 'AddInData', entity: { id: id } }]; }));
+                });
+            }, Promise.resolve()).then(function () { return ids.length; });
+        });
+    };
+
+    /** ¿El registro local es anterior al último borrado? (no se vuelve a subir) */
+    function beforeEpoch(rec, epoch) {
+        if (!epoch || !rec) { return false; }
+        return String(rec.updatedAt || rec.createdAt || '') < String(epoch);
+    }
+
     function settingsRecord(s, by) {
         var rec = { type: SETTINGS, key: SETTINGS, date: '', updatedAt: new Date().toISOString(), updatedBy: by || '' };
         Object.keys(DEFAULT_SETTINGS).forEach(function (k) { rec[k] = s[k] != null ? s[k] : DEFAULT_SETTINGS[k]; });
@@ -1390,6 +1419,6 @@
         jornadaForClaim: jornadaForClaim, crewIssues: crewIssues, claimIssues: claimIssues,
         newVisit: newVisit, newZoneRequest: newZoneRequest, zoneSquare: zoneSquare, zoneEntity: zoneEntity,
         zoneCenter: zoneCenter, nearbyZones: nearbyZones, needsZone: needsZone, withVisits: withVisits, clientLegs: clientLegs,
-        Store: Store, settingsRecord: settingsRecord, csv: csv
+        Store: Store, settingsRecord: settingsRecord, csv: csv, beforeEpoch: beforeEpoch
     };
 }));

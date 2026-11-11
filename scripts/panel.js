@@ -142,7 +142,7 @@ geotab.addin.workingHours = function () {
             var changes = r[0][0] || [], trips = r[0][1] || [], recs = r[1] || [];
             var ex = excludedSet();
             var jornadas = S.buildJornadas(changes, { now: Date.now(), isExcluded: function (id) { return !!ex[id]; } })
-                .filter(function (j) { return j.date >= from && j.date <= to; });
+                .filter(function (j) { return j.date >= from && j.date <= to && (!settings.sinceDate || j.date >= settings.sinceDate); });
             // confirmaciones del acompañante y declaraciones "viajo con…": marcan a cada acompañante
             // (m._ack) para que quien dijo "No viajo" no sume horas, y arman las discrepancias
             S.annotateCrews(recs, recs);
@@ -764,6 +764,13 @@ geotab.addin.workingHours = function () {
             + '<label class="wh-field">Sugerir geocercas a menos de (metros) <input type="number" id="wh-s-nznear" min="50" max="2000" step="50" value="' + esc(settings.nearZoneMeters || 300) + '"></label></div>'
             + '<div class="wh-card"><h3>Clientes sin geocerca</h3><p class="wh-muted">Uno por línea. Aparecen como opciones en Drive.</p>'
             + '<textarea id="wh-s-clients" rows="8">' + esc((settings.clients || []).join('\n')) + '</textarea></div>'
+            + '<div class="wh-card wh-card-danger"><h3>Empezar de cero</h3>'
+            + '<p class="wh-muted">Borra todos los registros: tripulaciones, confirmaciones, declaraciones "viajo con…", llegadas a clientes, geocercas pedidas y planillas confirmadas. '
+            + '<b>La configuración se conserva.</b> Las geocercas ya creadas en MyGeotab no se tocan. No se puede deshacer.</p>'
+            + '<p class="wh-muted">Las jornadas anteriores a hoy dejan de mostrarse, y los teléfonos descartan lo que tengan guardado sin sincronizar.</p>'
+            + (settings.dataEpoch ? '<p class="wh-muted">Último borrado: ' + esc(new Date(settings.dataEpoch).toLocaleString('es-AR')) + (settings.sinceDate ? ' · se muestra desde el ' + fmtDate(settings.sinceDate) : '') + '.</p>' : '')
+            + '<label class="wh-field">Escribí BORRAR para confirmar <input type="text" id="wh-s-reset-txt" autocomplete="off"></label>'
+            + '<button class="wh-btn wh-btn-danger" id="wh-s-reset" disabled>Borrar todos los registros</button></div>'
             + '</div><div class="wh-form-actions"><span class="wh-muted">' + (settings._id ? '' : 'Todavía no se guardó ninguna configuración (se usan los valores por defecto).') + '</span>'
             + '<button class="wh-btn" id="wh-s-save">Guardar configuración</button></div>';
         $('#wh-settings').innerHTML = html;
@@ -805,6 +812,29 @@ geotab.addin.workingHours = function () {
         }).catch(function (e) {
             $('#wh-s-save').disabled = false;
             showMsg('No se pudo guardar: ' + errText(e), 'error');
+        });
+    }
+
+    function resetAll() {
+        var btn = $('#wh-s-reset');
+        btn.disabled = true;
+        setBusy(true, 'Borrando registros…');
+        store.removeAllRecords().then(function (n) {
+            var s = S.clone(settings);
+            s.dataEpoch = new Date().toISOString();
+            s.sinceDate = S.dayKey(Date.now());
+            return store.save(S.settingsRecord(s, session.userName)).then(function (saved) {
+                settings = Object.assign(S.clone(S.DEFAULT_SETTINGS), s, { _id: saved._id });
+                items = []; summary = {}; visits = []; zoneReqs = []; allRecs = [];
+                setBusy(false);
+                renderAll();
+                renderSettings();
+                showMsg('Listo: se borraron ' + n + ' registros. Se cuenta desde hoy (' + fmtDate(s.sinceDate) + ').', 'ok');
+            });
+        }).catch(function (e) {
+            setBusy(false);
+            btn.disabled = false;
+            showMsg('No se pudo borrar: ' + errText(e) + ' (si se borró una parte, volvé a intentarlo).', 'error');
         });
     }
 
@@ -1014,6 +1044,7 @@ geotab.addin.workingHours = function () {
         });
         $('#wh-settings').addEventListener('click', function (e) {
             if (e.target.id === 'wh-s-save') { saveSettings(); }
+            if (e.target.id === 'wh-s-reset' && !e.target.disabled) { resetAll(); }
         });
         $('#wh-settings').addEventListener('change', function (e) {
             var id = e.target.getAttribute('data-base-zone');
@@ -1024,6 +1055,7 @@ geotab.addin.workingHours = function () {
             settings.baseZoneIds = list;
         });
         $('#wh-settings').addEventListener('input', function (e) {
+            if (e.target.id === 'wh-s-reset-txt') { $('#wh-s-reset').disabled = e.target.value.trim().toUpperCase() !== 'BORRAR'; return; }
             if (e.target.id !== 'wh-zone-search') { return; }
             zoneFilter = e.target.value;
             $('#wh-zone-list').innerHTML = renderZoneList();
