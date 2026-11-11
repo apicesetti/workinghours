@@ -136,8 +136,8 @@ var factory = function () {
         return store.settings().then(function (s) { settings = s; lsSet('settings', s); });
     }
 
-    function loadOperators() {
-        if (lsGet('operatorsAt', 0) > Date.now() - 6 * 3600000 && operators.length) { return Promise.resolve(); }
+    function loadOperators(force) {
+        if (!force && lsGet('operatorsAt', 0) > Date.now() - 6 * 3600000 && operators.length) { return Promise.resolve(); }
         return multiCall([
             ['Get', { typeName: 'User', search: { isDriver: true } }],
             ['Get', { typeName: 'Group' }]
@@ -156,9 +156,9 @@ var factory = function () {
         });
     }
 
-    function loadZones() {
+    function loadZones(force) {
         var cached = lsGet('zones', null);
-        if (cached && cached.at > Date.now() - 24 * 3600000) { zones = cached.list || []; return Promise.resolve(); }
+        if (!force && cached && cached.at > Date.now() - 24 * 3600000) { zones = cached.list || []; return Promise.resolve(); }
         return call('Get', {
             typeName: 'Zone',
             propertySelector: { fields: ['id', 'name', 'zoneTypes', 'points', 'activeTo'], isIncluded: true }
@@ -215,7 +215,7 @@ var factory = function () {
         }).then(function () {
             notifyPending();       // después de los nombres, para que el aviso diga en qué vehículo
         }).then(function () {
-            return opts.full ? Promise.all([loadOperators(), loadZones()]) : null;
+            return opts.full ? Promise.all([loadOperators(opts.forceLists), loadZones(opts.forceLists)]) : null;
         }).then(function () { return true; }).finally(function () { checking = null; });
         return checking;
     }
@@ -483,6 +483,7 @@ var factory = function () {
                 : 'Se cuentan desde ahora (' + S.hhmm(Date.now()) + ').') + '</p>'
             + '<input id="whd-search" class="whd-input" type="search" placeholder="Buscar por nombre o legajo" value="' + esc(filter) + '" autocomplete="off">'
             + (operators.length ? '' : '<p class="whd-hint">No hay lista de operarios en el teléfono. Conectate a internet y tocá ↻.</p>')
+            + (filter && !candidates.length ? notListedHint() : '')
             + '<ul class="whd-list whd-pick">' + candidates.slice(0, 80).map(function (o) {
                 var on = !!picked[o.id];
                 return '<li><label class="whd-check' + (on ? ' is-on' : '') + '"><input type="checkbox" data-pick="' + esc(o.id) + '"' + (on ? ' checked' : '') + '>'
@@ -493,6 +494,11 @@ var factory = function () {
             + (current.length ? '' : '<button class="whd-btn whd-btn-ghost" data-act="solo">Viajo solo</button>')
             + '</div>';
         return html;
+    }
+
+    function notListedHint() {
+        return '<p class="whd-hint">¿No aparece? La persona tiene que ser <b>conductor</b> en MyGeotab y estar en un grupo de conductores de los '
+            + 'configurados como <b>Operarios</b> (Horas de trabajo → Configuración). Si se cambió hace poco, tocá ↻.</p>';
     }
 
     function saveCrew() {
@@ -557,6 +563,7 @@ var factory = function () {
             + '<p class="whd-hint">Elegí al chofer. Le llega un aviso para que lo confirme. Se cuenta desde ahora (' + S.hhmm(Date.now()) + ').</p>'
             + '<input id="whd-search" class="whd-input" type="search" placeholder="Buscar chofer por nombre o legajo" value="' + esc(filter) + '" autocomplete="off">'
             + (operators.length ? '' : '<p class="whd-hint">No hay lista de choferes en el teléfono. Conectate a internet y tocá ↻.</p>')
+            + (f && !list.length ? notListedHint() : '')
             + '<ul class="whd-list whd-pick">' + list.slice(0, 60).map(function (o) {
                 return '<li><button class="whd-user" data-act="claimSave" data-user="' + esc(o.id) + '"><span>' + esc(o.name)
                     + (vehOf[o.id] ? '<small>' + esc(vehOf[o.id]) + '</small>' : (o.employeeNo ? '<small>Legajo ' + esc(o.employeeNo) + '</small>' : ''))
@@ -1073,9 +1080,10 @@ var factory = function () {
         if (root && root.scrollIntoView) { root.scrollIntoView(); }
     }
 
-    function refresh(full) {
+    /** full: relee configuración y listas; force: además ignora la caché de operarios y zonas (botón ↻). */
+    function refresh(full, force) {
         root && root.classList.add('is-busy');
-        return check({ full: full }).then(function () {
+        return check({ full: full, forceLists: !!force }).then(function () {
             return view.name === 'clients' ? loadClientTimelines() : null;
         }).then(function () { render(); }).catch(function (e) {
             showMsg(errText(e), 'error');
@@ -1108,7 +1116,7 @@ var factory = function () {
     function onClick(e) {
         (function () {
             var t = e.target && e.target.nodeType === 1 ? e.target : e.target && e.target.parentElement;
-            if (t && t.closest && t.closest('#whd-refresh') && inRoot(t)) { refresh(true); return; }
+            if (t && t.closest && t.closest('#whd-refresh') && inRoot(t)) { refresh(true, true); return; }
             var b = t && t.closest ? t.closest('[data-act]') : null;
             if (!b || b.disabled || !inRoot(b)) { return; }
             var act = b.getAttribute('data-act'), key = b.getAttribute('data-key');
@@ -1209,7 +1217,7 @@ var factory = function () {
             section = name === 'clients' ? 'clients' : 'crew';
             go('home');
         },
-        refresh: function () { return refresh(true); }
+        refresh: function () { return refresh(true, true); }
     };
 };
 // Dentro del add-in unificado "Mi jornada" (window.CESETTI_SHELL) lo registra el contenedor;
