@@ -126,3 +126,9 @@
 @media (prefers-color-scheme: dark) { #whDrive .whd-btn:not(.whd-btn-ghost) { color: #10161d; } }
 #whDrive .whd-btn:disabled { opacity: .45; }
 .whd-dim { opacity: .7; }
+
+/* Tripulación por identificación (v1.5) */
+.whd-idents li.whd-ident { display: block; }
+.whd-ident-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.whd-ident-crew { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.whd-ident-crew .whd-btn { margin-left: auto; }
