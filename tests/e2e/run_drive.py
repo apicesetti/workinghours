@@ -178,6 +178,14 @@ with sync_playwright() as p:
 
     # 7) getSession nunca recibe una función como 2.º parámetro (se lanzaría error)
     check(not [e for e in errors if 'MethodNotSupported' in e], 'getSession con firma correcta')
+    # desvincularse (Unknown de tipo "Driver", a nombre de nadie) corta el tramo también en Drive
+    page.evaluate("""() => { const n = new Date(); window.__db.DriverChange.push({ type: 'Driver', device: { id: 'b4' }, driver: 'UnknownDriverId',
+        dateTime: new Date(n.getFullYear(), n.getMonth(), n.getDate(), 12, 30).toISOString() }); window.__addin.focus(window.__api, window.__state); }""")
+    page.wait_for_timeout(800)
+    page.click('[data-act=home]') if page.locator('[data-act=home]').count() else None
+    page.wait_for_timeout(300)
+    card = page.inner_text('.whd-card')
+    check('hasta las 12:30' in card and 'en el vehículo' not in card, 'después de desvincularse la tarjeta dice hasta qué hora (%s)' % card.replace(chr(10), ' | ')[:120])
     b.close()
 
 print()

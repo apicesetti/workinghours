@@ -217,6 +217,20 @@ var factory = function () {
                 typeName: 'DriverChange',
                 search: { userSearch: { id: me.id }, fromDate: S.iso(from), toDate: S.iso(Date.now()) }
             });
+        }).then(function (mine) {
+            // Mis identificaciones no alcanzan: lo que corta mi tramo (otra persona, una llave de
+            // mantenimiento, un "desconocido" cargado al desvincularse) está a nombre de otro. Se
+            // traen todos los cambios de conductor de los vehículos en los que me identifiqué.
+            var devs = [];
+            (mine || []).forEach(function (c) { var d = S.idOf(c.device); if (d && devs.indexOf(d) < 0) { devs.push(d); } });
+            if (!devs.length) { return mine || []; }
+            return multiCall(devs.map(function (d) {
+                return ['Get', { typeName: 'DriverChange', search: { deviceSearch: { id: d }, fromDate: S.iso(from), toDate: S.iso(Date.now()) } }];
+            })).then(function (res) {
+                var all = [];
+                (res || []).forEach(function (l) { all = all.concat(l || []); });
+                return all;
+            }).catch(function () { return mine || []; });
         }).then(function (changes) {
             jornadas = S.buildJornadas(changes, { now: Date.now() }).filter(function (j) {
                 return j.driverId === me.id && (!settings.sinceDate || j.date >= settings.sinceDate);
