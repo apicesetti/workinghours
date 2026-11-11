@@ -21,7 +21,9 @@
  * Ingeniero Jorge Cesetti SRL
  */
 /* global geotab, WorkingHoursShared */
-geotab.addin.workingHoursDrive = function () {
+(function () {
+'use strict';
+var factory = function () {
     'use strict';
 
     var S = WorkingHoursShared;
@@ -38,7 +40,7 @@ geotab.addin.workingHoursDrive = function () {
     var records = {};              // key → registro (con _id y _dirty)
     var timelines = {};            // key → línea de tiempo (para paradas)
     var view = { name: 'home', key: null };
-    var timer = null, checking = null, listening = false, bound = false;
+    var timer = null, checking = null, listening = false;
 
     // ------------------------------------------------------------------
     // Utilidades
@@ -196,7 +198,7 @@ geotab.addin.workingHoursDrive = function () {
         }).then(function (changes) {
             jornadas = S.buildJornadas(changes, { now: Date.now() }).filter(function (j) { return j.driverId === me.id; });
             lsSet('jornadas', jornadas);
-            return store.crewByDates([S.addDays(today(), -1), today()]);
+            return store.recordsByDates([S.addDays(today(), -1), today()]);
         }).then(function (recs) {
             recs.forEach(function (r) {
                 var local = records[r.key];
@@ -270,6 +272,16 @@ geotab.addin.workingHoursDrive = function () {
         return Promise.resolve();
     }
 
+    function allRecords() { return Object.keys(records).map(function (k) { return records[k]; }).filter(Boolean); }
+    function myInvites() { return me ? S.invitesFor(me.id, allRecords()).filter(function (i) { return i.crew.date >= S.addDays(today(), -1); }) : []; }
+    function myClaimsToResolve() { return me ? S.claimsFor(me.id, allRecords()) : []; }
+    function pendingActions() {
+        var n = myInvites().length + myClaimsToResolve().length;
+        jornadas.forEach(function (j) { if (j.date === today() && !S.hasCrew(records[j.key])) { n++; } });
+        return n;
+    }
+    var APP = window.CESETTI_SHELL ? 'Mi jornada → Tripulación' : 'Horas de trabajo';
+
     function notifyPending() {
         var notified = lsGet('notified', {});
         var day = today();
@@ -278,11 +290,27 @@ geotab.addin.workingHoursDrive = function () {
             notified[j.key] = Date.now();
             var veh = devices[j.deviceId] || 'un vehículo';
             notify('¿Quién viaja con vos?',
-                'Te identificaste en ' + veh + ' a las ' + S.hhmm(j.firstAt) + '. Abrí Horas de trabajo y cargá tus acompañantes.');
+                'Te identificaste en ' + veh + ' a las ' + S.hhmm(j.firstAt) + '. Abrí ' + APP + ' y cargá tus acompañantes.');
+        });
+        // me cargaron como acompañante: confirmar
+        myInvites().forEach(function (i) {
+            var k = 'inv|' + i.crew.key + '|' + i.member.from;
+            if (notified[k]) { return; }
+            notified[k] = Date.now();
+            notify('¿Viajás con ' + (i.crew.driverName || 'otro chofer') + '?',
+                (i.crew.driverName || 'Un chofer') + ' te cargó como acompañante' + (i.crew.deviceName ? ' en ' + i.crew.deviceName : '')
+                + ' desde las ' + S.hhmm(i.member.from) + '. Abrí ' + APP + ' y confirmá.');
+        });
+        // alguien dice que viaja conmigo: confirmar o rechazar
+        myClaimsToResolve().forEach(function (c) {
+            var k = 'clm|' + c.key;
+            if (notified[k]) { return; }
+            notified[k] = Date.now();
+            notify(c.name + ' dice que viaja con vos', 'Desde las ' + S.hhmm(c.at) + '. Abrí ' + APP + ' para confirmarlo.');
         });
         // limpieza: solo se recuerdan las de los últimos 3 días
         var min = S.addDays(day, -3);
-        Object.keys(notified).forEach(function (k) { if (k.slice(0, 10) < min) { delete notified[k]; } });
+        Object.keys(notified).forEach(function (k) { if (notified[k] < Date.now() - 3 * S.DAY) { delete notified[k]; } });
         lsSet('notified', notified);
     }
 
@@ -333,20 +361,63 @@ geotab.addin.workingHoursDrive = function () {
         el.hidden = !parts.length;
     }
 
+    function renderAsks() {
+        var html = '';
+        myInvites().forEach(function (i) {
+            html += '<article class="whd-card whd-card-ask">'
+                + '<h2>¿Viajás con ' + esc(i.crew.driverName || 'este chofer') + '?</h2>'
+                + '<p class="whd-sub">Te cargó como acompañante' + (i.crew.deviceName ? ' en <b>' + esc(i.crew.deviceName) + '</b>' : '')
+                + ' desde las ' + S.hhmm(i.member.from) + (i.crew.date !== today() ? ' (ayer)' : '') + '.</p>'
+                + '<div class="whd-actions">'
+                + '<button class="whd-btn" data-act="ack" data-key="' + esc(i.crew.key) + '" data-status="ok">Sí, viajo</button>'
+                + '<button class="whd-btn whd-btn-ghost" data-act="ack" data-key="' + esc(i.crew.key) + '" data-status="no">No viajo</button>'
+                + '</div></article>';
+        });
+        myClaimsToResolve().forEach(function (c) {
+            html += '<article class="whd-card whd-card-ask">'
+                + '<h2>' + esc(c.name) + ' dice que viaja con vos</h2>'
+                + '<p class="whd-sub">Desde las ' + S.hhmm(c.at) + (c.date !== today() ? ' (ayer)' : '') + '. Si es así, se suma a tu tripulación.</p>'
+                + '<div class="whd-actions">'
+                + '<button class="whd-btn" data-act="claimOk" data-key="' + esc(c.key) + '">Confirmar</button>'
+                + '<button class="whd-btn whd-btn-ghost" data-act="claimNo" data-key="' + esc(c.key) + '">No viaja conmigo</button>'
+                + '</div></article>';
+        });
+        return html;
+    }
+
+    function renderMyClaims() {
+        if (!me) { return ''; }
+        var mine = S.claimsBy(me.id, allRecords()).filter(function (c) { return c.date === today(); }).slice(0, 3);
+        if (!mine.length) { return ''; }
+        var txt = { pending: 'esperando que confirme', accepted: 'confirmado', rejected: 'dijo que no viajás con él' };
+        return '<article class="whd-card"><h2>Viajes que declaraste</h2><ul class="whd-list">' + mine.map(function (c) {
+            return '<li><span>Con ' + esc(c.driverName) + '<small>desde las ' + S.hhmm(c.at) + '</small></span>'
+                + '<span class="whd-pill ' + (c.status === 'accepted' ? 'whd-pill-ok' : c.status === 'rejected' ? 'whd-pill-warn' : '') + '">' + txt[c.status] + '</span></li>';
+        }).join('') + '</ul></article>';
+    }
+
+    function claimButton() {
+        return '<div class="whd-claim"><button class="whd-btn whd-btn-ghost" data-act="claimStart">¿Viajás de acompañante? Viajo con…</button></div>';
+    }
+
     function renderHome() {
         var day = today();
         var list = jornadas.slice().sort(function (a, b) { return b.firstAt - a.firstAt; });
+        var asks = renderAsks();
         if (!list.length) {
-            return '<div class="whd-empty"><p><b>Sin identificaciones hoy.</b></p>'
-                + '<p>Cuando pases el llavero o la cámara te identifique en un vehículo, te vamos a avisar para que cargues quién viaja con vos.</p></div>';
+            return asks + renderMyClaims() + '<div class="whd-empty"><p><b>Sin identificaciones hoy.</b></p>'
+                + '<p>Cuando pases el llavero o la cámara te identifique en un vehículo, te vamos a avisar para que cargues quién viaja con vos.</p></div>'
+                + claimButton();
         }
-        return list.map(function (j) {
+        return asks + list.map(function (j) {
             var rec = records[j.key];
             var names = memberNames(rec);
             var crew;
             if (!S.hasCrew(rec)) { crew = '<span class="whd-pill whd-pill-warn">Falta cargar acompañantes</span>'; }
             else if (rec.solo && !names.length) { crew = '<span class="whd-pill">Viajó solo</span>'; }
             else { crew = '<span class="whd-pill whd-pill-ok">' + esc(names.join(', ') || 'Sin acompañantes ahora') + '</span>'; }
+            var issues = rec ? S.crewIssues(rec, allRecords()) : [];
+            if (issues.length) { crew += ' ' + issues.map(function (x) { return '<span class="whd-pill whd-pill-warn">' + esc(x.text) + '</span>'; }).join(' '); }
             var confirmed = rec && rec.planilla;
             var dayLbl = j.date === day ? 'Hoy' : 'Ayer';
             return '<article class="whd-card">'
@@ -359,7 +430,7 @@ geotab.addin.workingHoursDrive = function () {
                 + '<button class="whd-btn whd-btn-ghost" data-act="stops" data-key="' + esc(j.key) + '">Paradas y clientes</button>'
                 + '<button class="whd-btn whd-btn-ghost" data-act="sheet" data-key="' + esc(j.key) + '">Planilla</button>'
                 + '</div></article>';
-        }).join('');
+        }).join('') + renderMyClaims() + claimButton();
     }
 
     // ------------------------------------------------------------------
@@ -455,6 +526,79 @@ geotab.addin.workingHoursDrive = function () {
         var name = '';
         rec.members.forEach(function (m) { if (m.userId === userId && !m.to) { m.to = S.iso(Date.now()); name = m.name; } });
         saveLocal(rec, 'drop', name).then(render);
+        render();
+    }
+
+    // ------------------------------------------------------------------
+    // Confirmación de acompañante y "viajo con…"
+    // ------------------------------------------------------------------
+    function renderClaim() {
+        var filter = ($('#whd-search') && $('#whd-search').value || '').toLowerCase();
+        var norm = function (t) { return String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, ''); };
+        var f = norm(filter);
+        // primero los choferes con tripulación cargada hoy (se muestra el vehículo)
+        var vehOf = {};
+        allRecords().forEach(function (r) {
+            if (r.type === S.CREW && r.date === today() && r.deviceName) { vehOf[r.driverId] = r.deviceName; }
+        });
+        var list = operators.filter(function (o) {
+            return o.id !== (me && me.id) && (!f || norm(o.name).indexOf(f) >= 0 || (o.employeeNo || '').indexOf(f) >= 0);
+        }).sort(function (a, b) {
+            return (vehOf[b.id] ? 1 : 0) - (vehOf[a.id] ? 1 : 0) || a.name.localeCompare(b.name, 'es');
+        });
+        return '<button class="whd-back" data-act="home">‹ Volver</button>'
+            + '<h2 class="whd-title">¿Con quién viajás?</h2>'
+            + '<p class="whd-hint">Elegí al chofer. Le llega un aviso para que lo confirme. Se cuenta desde ahora (' + S.hhmm(Date.now()) + ').</p>'
+            + '<input id="whd-search" class="whd-input" type="search" placeholder="Buscar chofer por nombre o legajo" value="' + esc(filter) + '" autocomplete="off">'
+            + (operators.length ? '' : '<p class="whd-hint">No hay lista de choferes en el teléfono. Conectate a internet y tocá ↻.</p>')
+            + '<ul class="whd-list whd-pick">' + list.slice(0, 60).map(function (o) {
+                return '<li><button class="whd-user" data-act="claimSave" data-user="' + esc(o.id) + '"><span>' + esc(o.name)
+                    + (vehOf[o.id] ? '<small>' + esc(vehOf[o.id]) + '</small>' : (o.employeeNo ? '<small>Legajo ' + esc(o.employeeNo) + '</small>' : ''))
+                    + '</span></button></li>';
+            }).join('') + '</ul>';
+    }
+
+    function saveAck(crewKey, status) {
+        var crew = records[crewKey];
+        if (!crew || !me) { return; }
+        var rec = S.newAck(crew, me, status, by());
+        if (records[rec.key] && records[rec.key]._id) { rec._id = records[rec.key]._id; }
+        saveLocal(rec, 'ack', status).then(render);
+        render();
+    }
+
+    function saveClaim(driverId) {
+        var o = operators.filter(function (x) { return x.id === driverId; })[0];
+        if (!o || !me) { return; }
+        var rec = S.newClaim(me, o, { by: by() });
+        saveLocal(rec, 'claim', o.name).then(render);
+        view = { name: 'home', key: null };
+        render();
+    }
+
+    function resolveClaim(key, accept) {
+        var c = records[key];
+        if (!c) { return; }
+        var claim = S.clone(c);
+        claim.status = accept ? 'accepted' : 'rejected';
+        claim.resolvedAt = S.iso(Date.now());
+        claim.resolvedBy = by();
+        if (accept) {
+            var j = S.jornadaForClaim(jornadas, claim);
+            if (!j) { showMsg('No tenés una identificación ese día: no se puede sumar a ' + claim.name + '.', 'error'); return; }
+            var rec = S.clone(recordFor(j));
+            var already = (rec.members || []).some(function (m) { return m.userId === claim.userId && !m.to; });
+            if (!already) {
+                var from = Math.max(S.toMs(claim.at), j.firstAt);
+                rec.members.push({ userId: claim.userId, name: claim.name, from: S.iso(from), to: null, addedBy: by(), addedAt: S.iso(Date.now()), viaClaim: claim.key });
+                rec.solo = false;
+            }
+            claim.crewKey = rec.key;
+            S.addHistory(rec, by(), 'claim', claim.name);
+            rec._dirty = true;
+            records[rec.key] = rec;
+        }
+        saveLocal(claim, accept ? 'accept' : 'reject', '').then(render);
         render();
     }
 
@@ -659,6 +803,7 @@ geotab.addin.workingHoursDrive = function () {
     function findJornada(key) { return jornadas.filter(function (j) { return j.key === key; })[0] || null; }
 
     function render() {
+        root = document.getElementById('whDrive') || root;
         if (!root) { return; }
         var who = $('#whd-who');
         if (who) { who.textContent = me ? me.name : ''; }
@@ -667,6 +812,7 @@ geotab.addin.workingHoursDrive = function () {
         if (view.name === 'crew') { html = renderCrew(); }
         else if (view.name === 'stops') { html = renderStops(); }
         else if (view.name === 'sheet') { html = renderSheet(); }
+        else if (view.name === 'claim') { html = renderClaim(); }
         else { html = renderHome(); }
         var el = $('#whd-view');
         var search = $('#whd-search');
@@ -711,10 +857,34 @@ geotab.addin.workingHoursDrive = function () {
         }).finally(function () { root && root.classList.remove('is-busy'); });
     }
 
+    // Drive puede volver a insertar el HTML del add-in cada vez que se abre la página (initialize
+    // corre una vez, focus cada vez): los eventos se escuchan en el documento, no en el elemento.
+    function inRoot(el) {
+        var r = document.getElementById('whDrive');
+        if (!r || !el || !r.contains(el)) { return false; }
+        root = r;
+        return true;
+    }
+    // Los escuchadores se instalan una sola vez por documento y llaman a la instancia activa
+    // (la última que pasó por initialize/focus): Drive puede crear una instancia para startup y
+    // otra para la página.
     function bindEvents() {
-        root.addEventListener('click', function (e) {
-            var b = e.target.closest('[data-act]');
-            if (!b || b.disabled) { return; }
+        window.__whdHandlers = { click: onClick, change: onChange, input: onInput };
+        if (window.__whdBound) { return; }
+        window.__whdBound = true;
+        ['click', 'change', 'input'].forEach(function (type) {
+            document.addEventListener(type, function (e) {
+                var h = window.__whdHandlers && window.__whdHandlers[type];
+                if (h) { h(e); }
+            });
+        });
+    }
+    function onClick(e) {
+        (function () {
+            var t = e.target && e.target.nodeType === 1 ? e.target : e.target && e.target.parentElement;
+            if (t && t.closest && t.closest('#whd-refresh') && inRoot(t)) { refresh(true); return; }
+            var b = t && t.closest ? t.closest('[data-act]') : null;
+            if (!b || b.disabled || !inRoot(b)) { return; }
             var act = b.getAttribute('data-act'), key = b.getAttribute('data-key');
             if (act === 'home') { go('home'); }
             else if (act === 'crew') { go('crew', key); }
@@ -725,6 +895,11 @@ geotab.addin.workingHoursDrive = function () {
             else if (act === 'saveStops') { saveStops(); }
             else if (act === 'sheet') { go('sheet', key); }
             else if (act === 'confirmSheet') { confirmSheet(); }
+            else if (act === 'ack') { saveAck(key, b.getAttribute('data-status')); }
+            else if (act === 'claimStart') { go('claim'); }
+            else if (act === 'claimSave') { saveClaim(b.getAttribute('data-user')); }
+            else if (act === 'claimOk') { resolveClaim(key, true); }
+            else if (act === 'claimNo') { resolveClaim(key, false); }
             else if (act === 'retry') {
                 b.disabled = true;
                 flush().then(function () {
@@ -733,8 +908,11 @@ geotab.addin.workingHoursDrive = function () {
                     render();
                 });
             }
-        });
-        root.addEventListener('change', function (e) {
+        }());
+    }
+    function onChange(e) {
+        (function () {
+            if (!inRoot(e.target)) { return; }
             var pick = e.target.getAttribute('data-pick');
             if (pick) {
                 if (e.target.checked) { picked[pick] = true; } else { delete picked[pick]; }
@@ -746,11 +924,10 @@ geotab.addin.workingHoursDrive = function () {
                 var other = $('[data-stop-other="' + sel + '"]');
                 if (other) { other.hidden = e.target.value !== '__other'; if (!other.hidden) { other.focus(); } }
             }
-        });
-        root.addEventListener('input', function (e) {
-            if (e.target.id === 'whd-search') { render(); }
-        });
-        $('#whd-refresh').addEventListener('click', function () { refresh(true); });
+        }());
+    }
+    function onInput(e) {
+        if (e.target.id === 'whd-search' && inRoot(e.target)) { render(); }
     }
 
     function setup(freshApi, freshState) {
@@ -776,13 +953,14 @@ geotab.addin.workingHoursDrive = function () {
         initialize: function (freshApi, freshState, callback) {
             setup(freshApi, freshState);
             root = document.getElementById('whDrive');
-            if (root && !bound) { bindEvents(); bound = true; }
+            bindEvents();
             render();
             callback();
         },
         focus: function (freshApi, freshState) {
             setup(freshApi, freshState);
             root = document.getElementById('whDrive') || root;
+            bindEvents();
             view = { name: 'home', key: null };
             render();
             startLoop();
@@ -794,6 +972,15 @@ geotab.addin.workingHoursDrive = function () {
             setup(freshApi, freshState);
             var p = Promise.race([flush(), new Promise(function (r) { setTimeout(r, 12000); })]);
             return p.then(function () { if (typeof callback === 'function') { callback(); } });
-        }
+        },
+        /** Para el contenedor: cosas que esperan una respuesta de esta persona. */
+        pendingCount: function () { return pendingActions(); },
+        refresh: function () { return refresh(true); }
     };
 };
+// Dentro del add-in unificado "Mi jornada" (window.CESETTI_SHELL) lo registra el contenedor;
+// suelto, se registra como siempre.
+window.CesettiModules = window.CesettiModules || {};
+window.CesettiModules.workingHours = factory;
+if (!window.CESETTI_SHELL) { window.geotab = window.geotab || { addin: {} }; geotab.addin.workingHoursDrive = factory; }
+}());

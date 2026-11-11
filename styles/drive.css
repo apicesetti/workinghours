@@ -98,3 +98,10 @@
 .whd-warn-txt { color: var(--whd-warn-fg); }
 #whDrive .whd-msg .whd-btn { margin-left: 8px; }
 .whd-bar-static { position: static; background: none; }
+
+/* confirmación de acompañante y "viajo con…" (v1.2) */
+.whd-card-ask { border: 2px solid var(--whd-accent); }
+.whd-claim { margin: 8px 0 16px; }
+.whd-claim .whd-btn { width: 100%; }
+.whd-user { display: flex; width: 100%; text-align: left; background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; min-height: 44px; align-items: center; }
+.whd-user small { display: block; color: var(--whd-muted); font-size: 13px; }

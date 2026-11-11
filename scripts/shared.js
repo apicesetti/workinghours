@@ -12,6 +12,12 @@
  *                   clientes, visitas y acompañantes de una jornada. El conductor la confirma.
  *   Tripulación     registro AddInData (type "crew") con los acompañantes de una jornada y
  *                   los clientes de cada parada.
+ *   Confirmación    registro AddInData (type "ack") del acompañante: "Sí, viajo" / "No viajo"
+ *                   para una tripulación cargada por el chofer. Es un registro aparte para
+ *                   que el chofer y el acompañante nunca se pisen al guardar.
+ *   Declaración     registro AddInData (type "claim") de quien dice "viajo con <chofer>" sin
+ *                   que el chofer lo haya cargado. El chofer la confirma (se suma a su
+ *                   tripulación) o la rechaza.
  *   Horas fuera     desde el inicio del primer viaje hasta el fin del último viaje de la
  *                   jornada, descontando las paradas intermedias dentro de una zona Base.
  *
@@ -30,8 +36,10 @@
     'use strict';
 
     var ADDIN_ID = 'aETg6OS_TD0uqoFHaLelHvg';
-    var VERSION = '1.1.0';
+    var VERSION = '1.2.0';
     var CREW = 'crew';
+    var ACK = 'ack';
+    var CLAIM = 'claim';
     var SETTINGS = 'settings';
     var UNKNOWN_DRIVER = 'UnknownDriverId';
     var MAX_DETAILS_CHARS = 9500;          // límite de AddInData: 10.000 caracteres
@@ -647,6 +655,132 @@
         return null;
     }
 
+    // ------------------------------------------------------------------
+    // Confirmación del acompañante y declaración "viajo con…"
+    // ------------------------------------------------------------------
+    function ackKey(crewKey, userId) { return 'ack|' + crewKey + '|' + userId; }
+
+    function newAck(crew, user, status, by) {
+        var now = new Date().toISOString();
+        return {
+            type: ACK, version: 1, key: ackKey(crew.key, user.id), date: crew.date,
+            crewKey: crew.key, userId: user.id, name: user.name || '',
+            driverId: crew.driverId, driverName: crew.driverName || '',
+            status: status,            // ok | no
+            at: now, createdAt: now, createdBy: by || '', updatedAt: now, updatedBy: by || '', history: []
+        };
+    }
+
+    function newClaim(user, driver, info) {
+        info = info || {};
+        var now = new Date().toISOString();
+        var at = info.at != null ? iso(toMs(info.at)) : now;
+        return {
+            type: CLAIM, version: 1, key: 'claim|' + dayKey(at) + '|' + user.id + '|' + toMs(at),
+            date: dayKey(at), userId: user.id, name: user.name || '',
+            driverId: driver.id, driverName: driver.name || '',
+            deviceName: info.deviceName || '', at: at,
+            status: 'pending',         // pending | accepted | rejected
+            crewKey: null, resolvedAt: null, resolvedBy: null,
+            createdAt: now, createdBy: info.by || '', updatedAt: now, updatedBy: info.by || '', history: []
+        };
+    }
+
+    function byType(records, type) {
+        return (records || []).filter(function (r) { return r && r.type === type; });
+    }
+
+    /** Índice de confirmaciones: crewKey → userId → ack. */
+    function ackIndex(acks) {
+        var out = {};
+        byType(acks, ACK).forEach(function (a) {
+            var m = out[a.crewKey] || (out[a.crewKey] = {});
+            if (!m[a.userId] || String(a.updatedAt || '') > String(m[a.userId].updatedAt || '')) { m[a.userId] = a; }
+        });
+        return out;
+    }
+
+    /**
+     * Estado de un acompañante: 'ok' (confirmó o se sumó por su propia declaración),
+     * 'no' (dijo que no viajaba) o 'pending' (todavía no respondió).
+     */
+    function memberStatus(crew, member, idx) {
+        var a = idx && idx[crew.key] && idx[crew.key][member.userId];
+        if (a) { return a.status === 'no' ? 'no' : 'ok'; }
+        return member.viaClaim ? 'ok' : 'pending';
+    }
+
+    /** Marca m._ack en cada acompañante (campo local: no se guarda). Devuelve los mismos registros. */
+    function annotateCrews(crews, acks) {
+        var idx = ackIndex(acks);
+        byType(crews, CREW).forEach(function (c) {
+            (c.members || []).forEach(function (m) { m._ack = memberStatus(c, m, idx); });
+        });
+        return crews;
+    }
+
+    /** Tripulaciones de otros choferes donde figuro como acompañante y todavía no respondí. */
+    function invitesFor(userId, records) {
+        var idx = ackIndex(records);
+        var out = [];
+        byType(records, CREW).forEach(function (c) {
+            if (c.driverId === userId) { return; }
+            (c.members || []).forEach(function (m) {
+                if (m.userId !== userId || memberStatus(c, m, idx) !== 'pending') { return; }
+                out.push({ crew: c, member: m });
+            });
+        });
+        return out.sort(function (a, b) { return toMs(b.member.from) - toMs(a.member.from); });
+    }
+
+    /** Declaraciones pendientes dirigidas a un chofer. */
+    function claimsFor(driverId, records) {
+        return byType(records, CLAIM).filter(function (c) { return c.driverId === driverId && c.status === 'pending'; })
+            .sort(function (a, b) { return toMs(a.at) - toMs(b.at); });
+    }
+
+    /** Mis declaraciones (para mostrar "esperando que confirme"). */
+    function claimsBy(userId, records) {
+        return byType(records, CLAIM).filter(function (c) { return c.userId === userId; })
+            .sort(function (a, b) { return toMs(b.at) - toMs(a.at); });
+    }
+
+    /** Jornada del chofer a la que corresponde una declaración (la que contiene la hora, o la última del día). */
+    function jornadaForClaim(jornadas, claim) {
+        var t = toMs(claim.at);
+        var same = (jornadas || []).filter(function (j) { return j.date === claim.date; });
+        var inside = same.filter(function (j) {
+            return (j.segments || []).some(function (s) { return t >= s.from - 30 * MIN && (s.to == null || t <= s.to); });
+        });
+        var list = inside.length ? inside : same.filter(function (j) { return j.firstAt <= t + 30 * MIN; });
+        return list.sort(function (a, b) { return b.firstAt - a.firstAt; })[0] || null;
+    }
+
+    /**
+     * Discrepancias de una jornada para el supervisor.
+     * @returns [{ kind: 'no'|'pending'|'claim', userId, name, text }]
+     */
+    function crewIssues(crew, records) {
+        var out = [];
+        var idx = ackIndex(records);
+        ((crew && crew.members) || []).forEach(function (m) {
+            var st = memberStatus(crew, m, idx);
+            if (st === 'no') { out.push({ kind: 'no', userId: m.userId, name: m.name, text: m.name + ' dijo que no viajaba' }); }
+            else if (st === 'pending') { out.push({ kind: 'pending', userId: m.userId, name: m.name, text: m.name + ' no confirmó' }); }
+        });
+        return out;
+    }
+
+    /** Declaraciones sin resolver o rechazadas por el chofer de una jornada (para el supervisor). */
+    function claimIssues(jornada, records) {
+        return byType(records, CLAIM).filter(function (c) {
+            return c.driverId === jornada.driverId && c.date === jornada.date && c.status !== 'accepted';
+        }).map(function (c) {
+            return { kind: 'claim', userId: c.userId, name: c.name, status: c.status,
+                text: c.name + ' dijo que viajaba (' + hhmm(c.at) + ')' + (c.status === 'rejected' ? ' y el chofer lo rechazó' : ', sin confirmar por el chofer') };
+        });
+    }
+
     /** Envoltorio para AddInData (filtrable por type, date o key). */
     function wrap(rec) {
         return { type: rec.type, date: rec.date || '', key: rec.key || rec.type, rec: rec };
@@ -687,6 +821,14 @@
     function strip(rec) {
         var out = {};
         Object.keys(rec || {}).forEach(function (k) { if (k.charAt(0) !== '_') { out[k] = rec[k]; } });
+        // campos locales de los acompañantes (m._ack) tampoco se guardan
+        if (Array.isArray(out.members)) {
+            out.members = out.members.map(function (m) {
+                var c = {};
+                Object.keys(m || {}).forEach(function (k) { if (k.charAt(0) !== '_') { c[k] = m[k]; } });
+                return c;
+            });
+        }
         return out;
     }
 
@@ -712,6 +854,7 @@
         var out = [{ userId: jornada.driverId, role: 'driver', from: null, to: null }];
         ((rec && rec.members) || []).forEach(function (m) {
             if (!m.userId || m.userId === jornada.driverId) { return; }
+            if (m._ack === 'no') { return; }   // el acompañante dijo "No viajo": no se le cuentan horas
             out.push({ userId: m.userId, role: 'companion', from: toMs(m.from), to: toMs(m.to) });
         });
         return out;
@@ -927,6 +1070,25 @@
         };
     };
 
+    /** Todos los registros (tripulación, confirmaciones, declaraciones) de los días indicados. */
+    Store.prototype.recordsByDates = function (dates) {
+        var self = this;
+        var wanted = {};
+        dates.forEach(function (d) { wanted[d] = true; });
+        var keep = function (r) { return r && (r.type === CREW || r.type === ACK || r.type === CLAIM) && wanted[r.date]; };
+        function viaAll() { return self.all().then(function (recs) { return dedupe(recs.filter(keep)); }); }
+        if (!dates.length) { return Promise.resolve([]); }
+        if (!self.whereOk) { return viaAll(); }
+        return self.multiCall(dates.map(function (d) { return ['Get', self.where('date', d)]; })).then(function (results) {
+            var recs = [];
+            (results || []).forEach(function (list) { (list || []).forEach(function (e) { recs.push(unwrap(e)); }); });
+            return dedupe(recs.filter(keep));
+        }).catch(function () {
+            self.whereOk = false;
+            return viaAll();
+        });
+    };
+
     /** Registros de tripulación de los días indicados. */
     Store.prototype.crewByDates = function (dates) {
         var self = this;
@@ -1024,7 +1186,7 @@
     }
 
     return {
-        ADDIN_ID: ADDIN_ID, VERSION: VERSION, CREW: CREW, SETTINGS: SETTINGS,
+        ADDIN_ID: ADDIN_ID, VERSION: VERSION, CREW: CREW, ACK: ACK, CLAIM: CLAIM, SETTINGS: SETTINGS,
         UNKNOWN_DRIVER: UNKNOWN_DRIVER, DEFAULT_SETTINGS: DEFAULT_SETTINGS, MIN: MIN, DAY: DAY,
         esc: esc, clone: clone, toMs: toMs, iso: iso, parseTimeSpan: parseTimeSpan,
         dayKey: dayKey, dayStart: dayStart, dayEnd: dayEnd, daysBetween: daysBetween, addDays: addDays,
@@ -1042,6 +1204,9 @@
         newCrewRecord: newCrewRecord, addHistory: addHistory, activeMembers: activeMembers, hasCrew: hasCrew,
         stopEntry: stopEntry, wrap: wrap, unwrap: unwrap, strip: strip, fitSize: fitSize, dedupe: dedupe,
         participants: participants, clientVisits: clientVisits, summarize: summarize,
+        ackKey: ackKey, newAck: newAck, newClaim: newClaim, ackIndex: ackIndex, memberStatus: memberStatus,
+        annotateCrews: annotateCrews, invitesFor: invitesFor, claimsFor: claimsFor, claimsBy: claimsBy,
+        jornadaForClaim: jornadaForClaim, crewIssues: crewIssues, claimIssues: claimIssues,
         Store: Store, settingsRecord: settingsRecord, csv: csv
     };
 }));
