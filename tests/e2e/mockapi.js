@@ -134,6 +134,11 @@
             if (!cur) { throw { name: 'InvalidEntity', message: 'no existe ' + p.entity.id }; }
             cur.details = JSON.parse(JSON.stringify(p.entity.details)); return null;
         }
+        if (method === 'Add' && p.typeName === 'Zone') {
+            if (window.__denyZones) { throw { name: 'InvalidPermissionsException', message: 'Administer zones' }; }
+            var z = JSON.parse(JSON.stringify(p.entity)); z.id = 'zN' + (seq++); db.Zone.push(z); return z.id;
+        }
+        if (p.typeName === 'DeviceStatusInfo') { return []; }
         throw { name: 'MethodNotSupported', message: method + ' ' + p.typeName };
     }
     window.__state = { online: true, device: 'b4', driving: false };
@@ -157,7 +162,14 @@
         mobile: {
             exists: function () { return true; },
             notification: { notify: function (message, title) { window.__notifications.push({ title: title, message: message }); return Promise.resolve(); } },
-            listenTo: function (cb) { window.__listener = cb; }
+            listenTo: function (cb) { window.__listener = cb; },
+            geolocation: { getCurrentPosition: function (ok, err) {
+                setTimeout(function () {
+                    var p = window.__phone;
+                    if (!p) { err({ code: 1 }); return; }
+                    ok({ coords: { latitude: p.lat, longitude: p.lon, accuracy: p.acc || 10 }, timestamp: Date.now() });
+                }, 5);
+            } }
         }
     };
 }());

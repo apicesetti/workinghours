@@ -1,4 +1,4 @@
-# Horas de trabajo — Add-ins Geotab Drive + MyGeotab · v1.2
+# Horas de trabajo — Add-ins Geotab Drive + MyGeotab · v1.3
 
 Seguimiento de las **horas fuera de la oficina de todos los operarios**, aunque no manejen, y de los **clientes visitados** en cada parada.
 
@@ -7,6 +7,7 @@ Seguimiento de las **horas fuera de la oficina de todos los operarios**, aunque 
 - **Planilla diaria** — reemplaza la planilla en papel: odómetro inicial y final, km totales, km entre clientes, visitas (desde–hasta), acompañantes, hora de salida y de llegada. Se completa sola; el conductor la revisa y la **confirma** en Drive, y la oficina la ve, la exporta o la imprime.
 
 - **Confirmación de los acompañantes (v1.2)** — a cada acompañante cargado le llega un aviso en su Drive ("¿Viajás con Juan?") y responde **Sí, viajo** o **No viajo**. Quien no fue cargado puede declarar **Viajo con…** (buscador de choferes); al chofer le llega el aviso y lo confirma o lo rechaza. Las diferencias quedan marcadas para el supervisor en la página de MyGeotab.
+- **Clientes (v1.3)** — al llegar a un cliente el técnico toca **Llegué a un cliente** y elige el cliente (geocercas cercanas, catálogo, recientes o **cliente nuevo**). Se guarda la posición del teléfono (o la del vehículo si el teléfono no da). Si no hay geocerca cerca, **se pide una de 100 × 100 m** con el nombre del cliente, que el supervisor aprueba, renombra o asigna a una existente desde la página de MyGeotab. La visita termina sola cuando el vehículo se va; se calculan el **tiempo en el cliente** y el **tiempo y los km entre clientes**. La carga de clientes en las paradas también está en esta pestaña.
 - **Dentro de "Mi jornada"** — en Drive, este add-in se usa como la pestaña *Tripulación* del add-in unificado **Mi jornada** ([geotab-insights-v3/drive](https://github.com/apicesetti/geotab-insights-v3/tree/main/drive)), que además muestra al técnico su tiempo restante de jornada, fatiga e índice de riesgo. Ahí la jornada del acompañante sale de estos registros.
 
 No usa servidor propio: todo sale de `DriverChange` + `Trip` + `Zone` y se guarda en **AddInData**.
@@ -32,6 +33,9 @@ AddInData (tripulación y clientes) ───┘   ◄── Drive (chofer) / My
 | **Acompañantes** | Heredan la línea de tiempo del vehículo entre su hora de subida y de bajada. En la primera carga se cuentan desde la identificación; si se suman después, desde ese momento. |
 | **Confirmación del acompañante** | Registro aparte (`ack`), así el chofer y el acompañante nunca se pisan al guardar. **No viajo** → ese acompañante **no suma horas** en esa jornada y queda marcado. Sin respuesta → cuenta, marcado como "sin confirmar". |
 | **"Viajo con…"** | Registro `claim` del acompañante. Si el chofer lo confirma, se suma a su tripulación desde la hora de la declaración (o desde la identificación, si fue antes) y cuenta como confirmado. Si lo rechaza o no responde, no suma horas y queda marcado para el supervisor. |
+| **Llegada a un cliente** | Registro `visit` con la posición. Se asigna a la parada del vehículo que la contiene (desde 15 min antes de llegar hasta que se fue); lo que el chofer cargó a mano en esa parada tiene prioridad. Cuenta aunque la parada sea corta o sea la última del día (visita en curso). |
+| **Geocerca pedida** | Registro `zonereq`, solo si no hay una geocerca que contenga el punto ni una con el mismo nombre a menos de 300 m (configurable). No se sugieren las geocercas base ni las de más de 3 km (ciudades, rutas). Al aprobarla se crea una `Zone` cuadrada de 100 m de lado (configurable), con el tipo de zona y los grupos configurados. |
+| **Tiempo y km entre clientes** | Entre visitas consecutivas: desde que el vehículo se fue de un cliente hasta que llegó al siguiente, y los km de esos viajes. Si en el medio pasó por la oficina se muestra pero no se suma al total. |
 | **Varias jornadas el mismo día** | Si una persona acompañó a dos conductores, sus intervalos se **unen**, no se suman: nunca se duplican horas. |
 | **Paradas** | Cada viaje termina en una parada en su **destino** (`stopPoint`), que dura hasta el próximo viaje. Cuentan las de más de N minutos (configurable, 10 por defecto) fuera de la base. Si caen en una geocerca se sugiere como cliente; si no, el chofer elige del catálogo o escribe uno. |
 | **Movimientos dentro del predio** | Las paradas consecutivas unidas por un movimiento corto (≤ 1000 m y ≤ 10 min, configurable) o dentro de la misma geocerca se toman como **una sola visita**, desde que llegó hasta que se fue del predio. |
@@ -76,6 +80,8 @@ En Drive, **Planilla** muestra todo armado; el conductor agrega observaciones y 
    - *Cambios de conductor* (`DriverChange`) y *Viajes* (`Trip`),
    - *Zonas*, *Usuarios/Conductores* y *Grupos*,
    - *Datos de add-ins* (lectura y escritura; viene incluido en el perfil *Drive App User*).
+   - Para **Clientes**: aceptar el permiso de **ubicación** de Geotab Drive en el teléfono. Los técnicos **no** necesitan permiso para administrar zonas: la geocerca la crea el supervisor.
+   - El **supervisor** que aprueba geocercas sí necesita poder **administrar zonas**.
 
    Si no puede listar usuarios, el add-in usa la lista de conductores de Drive.
 5. En cada teléfono: iniciar sesión en Drive **una vez** y aceptar el permiso de notificaciones.
@@ -89,6 +95,8 @@ En Drive, **Planilla** muestra todo armado; el conductor agrega observaciones y 
 | `crew` | jornada | `key` (`AAAA-MM-DD\|driverId`; los de v1.0 con `AAAA-MM-DD\|deviceId\|driverId` se leen igual), `deviceId`, `deviceIds[]`, `driverId`, `identifiedAt`, `solo`, `members[]` (`userId`, `name`, `from`, `to`), `stops[]` (`tripId`, `from`, `to`, `zoneId`, `clients[]`, `noClient`), `planilla` (`confirmedAt`, `confirmedBy`, `signature`, `notes`, `snapshot`), `source` (drive/panel), `history[]` |
 | `ack` | acompañante y jornada | `key` (`ack\|<key de la tripulación>\|userId`), `date` (la de la tripulación), `crewKey`, `userId`, `driverId`, `status` (`ok`/`no`), `at` |
 | `claim` | declaración | `key` (`claim\|AAAA-MM-DD\|userId\|ms`), `date`, `userId` (quien declara), `driverId`, `at`, `status` (`pending`/`accepted`/`rejected`), `crewKey`, `resolvedAt`, `resolvedBy` |
+| `visit` | llegada | `key` (`visit\|AAAA-MM-DD\|userId\|ms`), `date`, `userId`, `client`, `clientNew`, `zoneId`, `deviceId`, `jornadaKey`, `lat`, `lon`, `acc`, `posSource` (`phone`/`vehicle`), `at` |
+| `zonereq` | geocerca pedida | `key` (`zonereq\|<key de la llegada>`), `date`, `client`, `lat`, `lon`, `status` (`pending`/`created`/`merged`/`rejected`), `zoneId`, `zoneName`, `resolvedAt`, `resolvedBy` |
 | `settings` | base | `operatorGroupIds`, `excludeGroupIds`, `baseZoneIds`, `clientZoneTypeIds`, `minStopMinutes`, `shortMoveMeters`, `shortMoveMinutes`, `commute` (exclude/include), `pollMinutes`, `clients[]` |
 
 Cada registro respeta el límite de 10.000 caracteres: se recorta el historial si hace falta.
@@ -107,8 +115,8 @@ Todo lo que carga el chofer se guarda primero en el teléfono y se sincroniza cu
 ## Tests
 
 ```bash
-TZ=America/Argentina/Buenos_Aires node --test tests/*.test.js   # lógica (20 tests)
-cd tests/e2e && python3 run_drive.py && python3 run_panel.py && python3 run_sync_error.py && python3 run_companions.py   # navegador (requiere playwright)
+TZ=America/Argentina/Buenos_Aires node --test tests/*.test.js   # lógica (21 tests)
+cd tests/e2e && python3 run_drive.py && python3 run_panel.py && python3 run_sync_error.py && python3 run_companions.py && python3 run_clients.py   # navegador (requiere playwright)
 ```
 
 Los tests de lógica usan datos reales de intcesetti del 28/10/2026: una llave de mantenimiento que corta la jornada de Canales en WP, y los viajes y odómetros de Falcon en OE para la planilla. Los recorridos en navegador fijan el reloj a las 18:30 para no depender de la hora en que se corren.

@@ -28,7 +28,7 @@ geotab.addin.workingHours = function () {
     var session = { userName: '' };
     var settings = S.clone(S.DEFAULT_SETTINGS);
     var store = null;
-    var users = {}, groups = [], devices = {}, zones = [], zoneTypes = [];
+    var users = {}, groups = [], devices = {}, zones = [], zoneTypes = [], allRecs = [];
     var refLoaded = false;
     var range = { from: null, to: null };
     var items = [];          // [{ jornada, timeline, rec }]
@@ -161,8 +161,12 @@ geotab.addin.workingHours = function () {
                     odo: null
                 };
             });
+            allRecs = recs;
+            items.forEach(function (it) { it.recV = S.withVisits(it.rec, it.timeline, recs); });
             setBusy(true, 'Leyendo odómetros…');
             return loadOdometers(items);
+        }).then(function () {
+            return loadZoneReqs();
         }).then(function () {
             recompute();
             setBusy(false);
@@ -205,19 +209,19 @@ geotab.addin.workingHours = function () {
     function vehiclesOf(j) { return S.deviceIdsOf(j).map(dName).join(' + '); }
 
     function recompute() {
-        summary = S.summarize(items);
+        summary = S.summarize(items.map(function (it) { return { jornada: it.jornada, timeline: it.timeline, rec: it.recV || it.rec }; }));
         visits = [];
         items.forEach(function (it) {
             if (!it.timeline || it.timeline.firstStart == null) { return; }
-            var people = S.participants(it.jornada, it.rec);
-            S.clientVisits(it.timeline, it.rec).forEach(function (v) {
+            var people = S.participants(it.jornada, it.recV || it.rec);
+            S.clientVisits(it.timeline, it.recV || it.rec).forEach(function (v) {
                 var present = people.filter(function (p) {
                     return S.clip([{ from: v.from, to: v.to }], p.from, p.to).length;
                 }).map(function (p) { return p.userId; });
                 visits.push({
                     date: it.jornada.date, key: it.jornada.key, deviceId: v.deviceId || it.jornada.deviceId,
                     client: v.clients.join(', '), from: v.from, to: v.to, duration: v.to - v.from,
-                    people: present, confirmed: v.confirmed
+                    people: present, confirmed: v.confirmed, checkin: v.checkin
                 });
             });
         });
@@ -509,7 +513,7 @@ geotab.addin.workingHours = function () {
         var btn = $('#wh-m-save');
         btn.disabled = true;
         store.save(draft).then(function (saved) {
-            items.forEach(function (it) { if (it.jornada.key === modalKey) { it.rec = saved; } });
+            items.forEach(function (it) { if (it.jornada.key === modalKey) { it.rec = saved; it.recV = S.withVisits(saved, it.timeline, allRecs); } });
             closeModal();
             recompute();
             renderAll();
@@ -551,16 +555,127 @@ geotab.addin.workingHours = function () {
             return '<tr><td>' + fmtDate(v.date) + '</td><td>' + esc(v.client) + '</td><td>' + esc(dName(v.deviceId)) + '</td>'
                 + '<td>' + S.hhmm(v.from) + '</td><td>' + S.hhmm(v.to) + '</td><td class="wh-num">' + S.fmtDuration(v.duration) + '</td>'
                 + '<td class="wh-wrap">' + esc(v.people.map(uName).join(', ')) + '</td>'
-                + '<td>' + (v.confirmed ? 'Chofer' : '<span class="wh-muted">Geocerca</span>') + '</td></tr>';
+                + '<td>' + originText(v, true) + '</td></tr>';
         }).join('');
         $('#wh-visits-empty').hidden = !!rows.length;
+        renderLegs();
+        renderZoneReqs();
+    }
+
+    function originText(v, html) {
+        if (v.checkin) { return 'Llegada en Drive'; }
+        if (v.confirmed) { return 'Chofer'; }
+        return html ? '<span class="wh-muted">Geocerca</span>' : 'Geocerca';
+    }
+
+    // tramos entre clientes consecutivos (tiempo y km), por jornada
+    function legRows() {
+        var f = ($('#wh-c-filter').value || '').toLowerCase();
+        var out = [];
+        items.forEach(function (it) {
+            if (!it.timeline || it.timeline.firstStart == null) { return; }
+            S.clientLegs(it.timeline, it.recV || it.rec).forEach(function (l) {
+                var r = Object.assign({ date: it.jornada.date, jornada: it.jornada }, l);
+                if (matches([l.from, l.to, vehiclesOf(it.jornada), uName(it.jornada.driverId)].join(' '), f)) { out.push(r); }
+            });
+        });
+        return out.sort(function (a, b) { return b.leftAt - a.leftAt; });
+    }
+    function renderLegs() {
+        var rows = legRows();
+        $('#wh-legs').innerHTML = rows.map(function (l) {
+            return '<tr><td>' + fmtDate(l.date) + '</td><td>' + esc(vehiclesOf(l.jornada)) + '<br><span class="wh-muted">' + esc(uName(l.jornada.driverId)) + '</span></td>'
+                + '<td>' + esc(l.from) + '</td><td>' + esc(l.to) + '</td><td>' + S.hhmm(l.leftAt) + '</td><td>' + S.hhmm(l.arrivedAt) + '</td>'
+                + '<td class="wh-num">' + S.fmtDuration(l.ms) + '</td><td class="wh-num">' + S.fmtKm(l.km) + '</td>'
+                + '<td>' + (l.viaBase ? '<span class="wh-muted">Pasó por la oficina</span>' : '') + '</td></tr>';
+        }).join('');
+        $('#wh-legs-empty').hidden = !!rows.length;
+    }
+
+    // ------------------------------------------------------------------
+    // Geocercas pedidas desde las llegadas en Drive (las aprueba el supervisor)
+    // ------------------------------------------------------------------
+    var zoneReqs = [];
+    function loadZoneReqs() {
+        return store.pendingZoneRequests().then(function (list) { zoneReqs = list || []; }).catch(function () { zoneReqs = []; });
+    }
+    function renderZoneReqs() {
+        var el = $('#wh-zonereqs');
+        if (!el) { return; }
+        var pend = zoneReqs.filter(function (r) { return r.status === 'pending'; }).sort(function (a, b) { return S.toMs(a.at) - S.toMs(b.at); });
+        var done = zoneReqs.filter(function (r) { return r.status !== 'pending'; }).sort(function (a, b) { return S.toMs(b.resolvedAt) - S.toMs(a.resolvedAt); }).slice(0, 10);
+        $('#wh-zonereqs-count').textContent = pend.length ? '(' + pend.length + ' pendiente' + (pend.length === 1 ? '' : 's') + ')' : '';
+        if (!pend.length && !done.length) { el.innerHTML = '<p class="wh-muted">No hay geocercas pedidas.</p>'; return; }
+        var typeTxt = settings.newZoneTypeId ? zoneTypeName(settings.newZoneTypeId) : 'sin tipo';
+        el.innerHTML = (pend.length ? '<p class="wh-muted">Se crean de ' + (settings.newZoneSize || 100) + ' × ' + (settings.newZoneSize || 100) + ' m, tipo «' + esc(typeTxt) + '» (se cambia en Configuración).</p>' : '')
+            + '<table class="wh-table"><thead><tr><th>Pedida</th><th>Cliente</th><th>Ubicación</th><th>Geocercas cerca</th><th></th></tr></thead><tbody>'
+            + pend.map(function (r) {
+                var near = S.nearbyZones({ x: r.lon, y: r.lat }, zones, settings, 500).slice(0, 5);
+                return '<tr data-req="' + esc(r.key) + '"><td>' + fmtDate(r.date) + ' ' + S.hhmm(r.at) + '<br><span class="wh-muted">' + esc(r.name) + '</span></td>'
+                    + '<td><input type="text" class="wh-input-sm" data-req-name value="' + esc(r.client) + '">' + (r.clientNew ? '<br><span class="wh-badge wh-badge-warn">Cliente nuevo</span>' : '') + '</td>'
+                    + '<td><a href="https://maps.google.com/?q=' + r.lat + ',' + r.lon + '" target="_blank" rel="noopener">Ver en el mapa</a>' + (r.acc != null ? '<br><span class="wh-muted">±' + r.acc + ' m</span>' : '') + '</td>'
+                    + '<td>' + (near.length ? '<select data-req-merge><option value="">—</option>' + near.map(function (n) {
+                        return '<option value="' + esc(n.zone.id) + '">' + esc(n.zone.name) + ' (' + (n.inside ? 'contiene el punto' : Math.round(n.dist) + ' m') + ')</option>';
+                    }).join('') + '</select>' : '<span class="wh-muted">ninguna</span>') + '</td>'
+                    + '<td class="wh-col-actions"><button class="wh-btn wh-btn-sm" data-req-act="create">Crear geocerca</button> '
+                    + (near.length ? '<button class="wh-btn wh-btn-sm wh-btn-ghost" data-req-act="merge">Usar la elegida</button> ' : '')
+                    + '<button class="wh-btn wh-btn-sm wh-btn-danger" data-req-act="reject">Rechazar</button></td></tr>';
+            }).join('')
+            + done.map(function (r) {
+                var st = { created: 'Creada', merged: 'Asignada a existente', rejected: 'Rechazada' }[r.status] || r.status;
+                return '<tr class="wh-muted"><td>' + fmtDate(r.date) + ' ' + S.hhmm(r.at) + '</td><td>' + esc(r.zoneName || r.client) + '</td><td colspan="2">' + st
+                    + (r.resolvedBy ? ' por ' + esc(r.resolvedBy) : '') + '</td><td></td></tr>';
+            }).join('')
+            + '</tbody></table>';
+    }
+    function resolveZoneReq(key, action, tr) {
+        var r = zoneReqs.filter(function (x) { return x.key === key; })[0];
+        if (!r) { return; }
+        var rec = S.clone(r);
+        rec._id = r._id;
+        var name = (tr.querySelector('[data-req-name]').value || r.client).trim();
+        var p;
+        if (action === 'create') {
+            p = call('Add', { typeName: 'Zone', entity: S.zoneEntity(r, settings, name) }).then(function (id) {
+                rec.status = 'created'; rec.zoneId = id; rec.zoneName = name;
+                zones.push(S.compactZone({ id: id, name: name, points: S.zoneSquare(r.lat, r.lon, settings.newZoneSize || 100), zoneTypes: settings.newZoneTypeId ? [{ id: settings.newZoneTypeId }] : [] }));
+            });
+        } else if (action === 'merge') {
+            var sel = tr.querySelector('[data-req-merge]');
+            if (!sel || !sel.value) { showMsg('Elegí la geocerca existente.', 'error'); return; }
+            rec.status = 'merged'; rec.zoneId = sel.value; rec.zoneName = sel.options[sel.selectedIndex].text.replace(/ \(.*\)$/, '');
+            p = Promise.resolve();
+        } else {
+            rec.status = 'rejected';
+            p = Promise.resolve();
+        }
+        tr.querySelectorAll('button').forEach(function (b) { b.disabled = true; });
+        p.then(function () {
+            rec.resolvedAt = new Date().toISOString(); rec.resolvedBy = session.userName;
+            S.addHistory(rec, session.userName, action, name);
+            return store.save(rec);
+        }).then(function (saved) {
+            zoneReqs = zoneReqs.map(function (x) { return x.key === key ? saved : x; });
+            showMsg(action === 'create' ? 'Geocerca «' + name + '» creada.' : action === 'merge' ? 'Asignada a la geocerca existente.' : 'Pedido rechazado.', 'ok');
+            renderZoneReqs();
+        }).catch(function (e) {
+            tr.querySelectorAll('button').forEach(function (b) { b.disabled = false; });
+            showMsg('No se pudo: ' + errText(e) + (/Zone/.test(errText(e)) || /permission|Unauthorized/i.test(errText(e)) ? ' (¿tu usuario puede administrar zonas?)' : ''), 'error');
+        });
     }
 
     function exportClients() {
         var rows = [['Fecha', 'Cliente', 'Vehículo', 'Desde', 'Hasta', 'Horas', 'Personas', 'Cantidad de personas', 'Origen']];
         visitRows().forEach(function (v) {
             rows.push([v.date, v.client, dName(v.deviceId), S.hhmm(v.from), S.hhmm(v.to), S.hoursDecimal(v.duration),
-                v.people.map(uName).join(', '), v.people.length, v.confirmed ? 'Chofer' : 'Geocerca']);
+                v.people.map(uName).join(', '), v.people.length, originText(v, false)]);
+        });
+        rows.push([]);
+        rows.push(['Tramos entre clientes']);
+        rows.push(['Fecha', 'Vehículo', 'Chofer', 'Desde cliente', 'Hasta cliente', 'Salida', 'Llegada', 'Horas', 'Km', 'Pasó por la oficina']);
+        legRows().forEach(function (l) {
+            rows.push([l.date, vehiclesOf(l.jornada), uName(l.jornada.driverId), l.from, l.to, S.hhmm(l.leftAt), S.hhmm(l.arrivedAt),
+                S.hoursDecimal(l.ms), S.fmtKm(l.km), l.viaBase ? 'sí' : '']);
         });
         download('clientes_' + range.from + '_' + range.to + '.csv', S.csv(rows));
     }
@@ -641,6 +756,12 @@ geotab.addin.workingHours = function () {
             + 'No cuentan: la jornada empieza al llegar al primer destino y termina al salir de la última parada de trabajo</label>'
             + '<label class="wh-check"><input type="radio" name="wh-commute" value="include"' + (settings.commute === 'include' ? ' checked' : '') + '> '
             + 'Cuentan: desde que sale de su casa hasta que llega</label></div>'
+            + '<div class="wh-card"><h3>Geocercas desde las llegadas</h3><p class="wh-muted">Cuando un técnico registra la llegada a un cliente sin geocerca cerca, se pide una. Se crean al aprobarlas en la pestaña Clientes.</p>'
+            + '<label class="wh-field">Tipo de zona <select id="wh-s-nztype"><option value="">Sin tipo</option>' + zoneTypes.slice().sort(function (a, b) { return String(a.name).localeCompare(String(b.name), 'es'); }).map(function (t) {
+                return '<option value="' + esc(t.id) + '"' + (settings.newZoneTypeId === t.id ? ' selected' : '') + '>' + esc(zoneTypeName(t.id)) + '</option>';
+            }).join('') + '</select></label>'
+            + '<label class="wh-field">Lado del cuadrado (metros) <input type="number" id="wh-s-nzsize" min="30" max="1000" step="10" value="' + esc(settings.newZoneSize || 100) + '"></label>'
+            + '<label class="wh-field">Sugerir geocercas a menos de (metros) <input type="number" id="wh-s-nznear" min="50" max="2000" step="50" value="' + esc(settings.nearZoneMeters || 300) + '"></label></div>'
             + '<div class="wh-card"><h3>Clientes sin geocerca</h3><p class="wh-muted">Uno por línea. Aparecen como opciones en Drive.</p>'
             + '<textarea id="wh-s-clients" rows="8">' + esc((settings.clients || []).join('\n')) + '</textarea></div>'
             + '</div><div class="wh-form-actions"><span class="wh-muted">' + (settings._id ? '' : 'Todavía no se guardó ninguna configuración (se usan los valores por defecto).') + '</span>'
@@ -669,6 +790,9 @@ geotab.addin.workingHours = function () {
         var sm = parseInt($('#wh-s-shortm').value, 10), smin = parseInt($('#wh-s-shortmin').value, 10);
         s.shortMoveMeters = isNaN(sm) ? S.DEFAULT_SETTINGS.shortMoveMeters : Math.max(0, sm);
         s.shortMoveMinutes = isNaN(smin) ? S.DEFAULT_SETTINGS.shortMoveMinutes : Math.max(0, smin);
+        s.newZoneTypeId = $('#wh-s-nztype').value || '';
+        s.newZoneSize = Math.min(1000, Math.max(30, parseInt($('#wh-s-nzsize').value, 10) || 100));
+        s.nearZoneMeters = Math.min(2000, Math.max(50, parseInt($('#wh-s-nznear').value, 10) || 300));
         var commute = root.querySelector('input[name="wh-commute"]:checked');
         s.commute = commute ? commute.value : 'exclude';
         s.clients = ($('#wh-s-clients').value || '').split(/\r?\n/).map(function (c) { return c.trim(); })
@@ -691,7 +815,7 @@ geotab.addin.workingHours = function () {
         var filter = ($('#wh-p-filter').value || '').toLowerCase();
         var st = $('#wh-p-state').value;
         return items.map(function (it) {
-            return { it: it, p: S.buildPlanilla(it.jornada, it.timeline, it.rec, it.odo) };
+            return { it: it, p: S.buildPlanilla(it.jornada, it.timeline, it.recV || it.rec, it.odo) };
         }).filter(function (r) {
             if (!r.p) { return false; }
             var ok = r.p.confirmation && !r.p.changed;
@@ -881,6 +1005,12 @@ geotab.addin.workingHours = function () {
             var del = e.target.getAttribute('data-m-del');
             if (del != null) { readModal(); draft.members.splice(parseInt(del, 10), 1); renderModal(); return; }
             if (e.target.id === 'wh-m-save') { saveModal(); }
+        });
+        $('#wh-zonereqs').addEventListener('click', function (e) {
+            var b = e.target.closest('[data-req-act]');
+            if (!b || b.disabled) { return; }
+            var tr = b.closest('tr[data-req]');
+            resolveZoneReq(tr.getAttribute('data-req'), b.getAttribute('data-req-act'), tr);
         });
         $('#wh-settings').addEventListener('click', function (e) {
             if (e.target.id === 'wh-s-save') { saveSettings(); }

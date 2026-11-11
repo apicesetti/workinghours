@@ -471,3 +471,65 @@ test('confirmación del acompañante y declaración "viajo con…" (v1.2)', () =
     assert.equal(S.claimsFor('b43F', [cl]).length, 0);
     assert.equal(S.claimIssues(j, [cl]).length, 0);
 });
+
+test('llegadas a clientes (check-in), geocercas pedidas y tramos entre clientes (v1.3)', () => {
+    const at = (h, m) => new Date(NOW - 18 * H + h * H + m * M).toISOString();   // NOW = 18:00 → hoy 00:00 + h:m
+    const base = { x: -68.0578, y: -38.9504 };
+    const zones = [
+        S.compactZone({ id: 'zBase', name: 'Oficina', points: [{ x: base.x - 0.002, y: base.y - 0.002 }, { x: base.x + 0.002, y: base.y - 0.002 }, { x: base.x + 0.002, y: base.y + 0.002 }, { x: base.x - 0.002, y: base.y + 0.002 }] }),
+        S.compactZone({ id: 'zCiudad', name: 'Ciudad - Neuquén', points: [{ x: -68.2, y: -39.1 }, { x: -67.9, y: -39.1 }, { x: -67.9, y: -38.8 }, { x: -68.2, y: -38.8 }] }),
+        S.compactZone({ id: 'zA', name: 'Cliente A', points: S.zoneSquare(-38.99, -67.90, 100) })
+    ];
+    const settings = Object.assign(S.clone(S.DEFAULT_SETTINGS), { baseZoneIds: ['zBase'] });
+    // zoneSquare: ~100 m de lado
+    const sq = S.zoneSquare(-38.95, -68.0, 100);
+    assert.equal(sq.length, 5);
+    assert.ok(Math.abs(S.distanceMeters(sq[0], sq[1]) - 100) < 1 && Math.abs(S.distanceMeters(sq[1], sq[2]) - 100) < 1);
+    // zonas cercanas: no la base ni la de ciudad (gigante)
+    const pA = { x: -67.9003, y: -38.9901 };
+    assert.deepEqual(S.nearbyZones(pA, zones, settings).map(r => r.zone.id), ['zA']);
+    assert.equal(S.needsZone('Cliente A', pA, zones, settings), false);
+    const pB = { x: -67.80, y: -39.05 };
+    assert.equal(S.needsZone('Cliente B', pB, zones, settings), true);
+    // jornada: oficina → A (08:30–10:00) → B (10:40–12:00) → oficina
+    const j = { key: 'k', date: S.dayKey(NOW), driverId: 'd', deviceId: 'v', firstAt: new Date(at(8, 0)).getTime(),
+        segments: [{ deviceId: 'v', from: new Date(at(8, 0)).getTime(), to: new Date(at(13, 0)).getTime() }] };
+    const trips = [
+        { id: 't0', device: { id: 'v' }, start: at(7, 0), stop: at(7, 10), stopPoint: base, nextTripStart: at(8, 0), distance: 5 },
+        { id: 't1', device: { id: 'v' }, start: at(8, 0), stop: at(8, 30), stopPoint: { x: -67.9001, y: -38.9902 }, nextTripStart: at(10, 0), distance: 20 },
+        { id: 't2', device: { id: 'v' }, start: at(10, 0), stop: at(10, 40), stopPoint: { x: -67.8001, y: -39.0501 }, nextTripStart: at(12, 0), distance: 30 },
+        { id: 't3', device: { id: 'v' }, start: at(12, 0), stop: at(12, 45), stopPoint: base, distance: 40, stopDuration: '04:00:00' }
+    ];
+    const tl = S.buildTimeline(j, trips, { zones, settings });
+    // sin check-in: A por geocerca, B sin cliente
+    assert.deepEqual(S.clientVisits(tl, null).map(v => v.clients[0]), ['Cliente A']);
+    // check-in en B (10:45) desde el teléfono
+    const v = S.newVisit({ id: 'u1', name: 'Juan' }, { client: 'Cliente B', clientNew: true, lat: pB.y, lon: pB.x, acc: 12, posSource: 'phone', deviceId: 'v', at: at(10, 45) });
+    assert.ok(v.key.startsWith('visit|' + j.date + '|u1|'));
+    const rec = S.withVisits(null, tl, [v]);
+    const vis = S.clientVisits(tl, rec);
+    assert.deepEqual(vis.map(x => x.clients[0]), ['Cliente A', 'Cliente B']);
+    assert.equal(vis[1].checkin, v.key);
+    assert.equal(vis[1].to - vis[1].from, 80 * M, 'en B de 10:40 a 12:00: termina sola cuando el vehículo se va');
+    // lo cargado a mano gana sobre la llegada
+    const manual = { stops: [{ tripId: 't2', clients: ['Otro'] }] };
+    assert.equal(S.clientVisits(tl, S.withVisits(manual, tl, [v]))[1].clients[0], 'Otro');
+    // tramos entre clientes: A (se fue 10:00) → B (llegó 10:40), 30 km
+    const legs = S.clientLegs(tl, rec);
+    assert.deepEqual(legs.map(l => [l.from, l.to, l.ms / M, l.km, l.viaBase]), [['Cliente A', 'Cliente B', 40, 30, false]]);
+    const p = S.buildPlanilla(j, tl, rec);
+    assert.equal(p.timeBetweenClients, 40 * M);
+    assert.equal(p.clientLegs.length, 1);
+    // llegada a la última parada (en curso) también cuenta si hay check-in
+    const v2 = S.newVisit({ id: 'u1', name: 'Juan' }, { client: 'Oficina?', deviceId: 'v', at: at(12, 50) });
+    assert.equal(S.clientVisits(tl, S.withVisits(null, tl, [v2])).length, 1, 'la parada final en la base no cuenta como cliente');
+    // geocerca pedida → entidad Zone de 100 × 100 m
+    const req = S.newZoneRequest(v, 'jp');
+    assert.equal(req.status, 'pending');
+    assert.equal(req.date, v.date);
+    const ze = S.zoneEntity(req, Object.assign({}, settings, { newZoneTypeId: 'b55' }));
+    assert.equal(ze.name, 'Cliente B');
+    assert.deepEqual(ze.zoneTypes, [{ id: 'b55' }]);
+    assert.deepEqual(ze.groups, [{ id: 'GroupCompanyId' }]);
+    assert.equal(ze.points.length, 5);
+});

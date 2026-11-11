@@ -105,3 +105,10 @@
 .whd-claim .whd-btn { width: 100%; }
 .whd-user { display: flex; width: 100%; text-align: left; background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; min-height: 44px; align-items: center; }
 .whd-user small { display: block; color: var(--whd-muted); font-size: 13px; }
+
+/* Clientes: llegada y visitas del día (v1.3) */
+.whd-btn-big { width: 100%; min-height: 56px; font-size: 18px; font-weight: 600; margin-bottom: 14px; }
+.whd-visits { list-style: none; margin: 10px 0 6px; padding: 0; }
+.whd-visit { display: flex; flex-direction: column; padding: 8px 10px; border-left: 4px solid var(--whd-accent); background: var(--whd-bg); border-radius: 6px; }
+.whd-visit span { color: var(--whd-muted); font-size: 14px; }
+.whd-leg { color: var(--whd-muted); font-size: 13px; padding: 4px 0 4px 14px; }

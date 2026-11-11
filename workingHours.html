@@ -111,6 +111,8 @@
             <span class="wh-spacer"></span>
             <button id="wh-c-export" class="wh-btn wh-btn-ghost">Exportar CSV</button>
         </div>
+        <h2 class="wh-h2">Geocercas pedidas desde Drive <span id="wh-zonereqs-count" class="wh-muted"></span></h2>
+        <div class="wh-table-wrap" id="wh-zonereqs"></div>
         <h2 class="wh-h2">Resumen por cliente</h2>
         <div class="wh-table-wrap">
             <table class="wh-table">
@@ -145,6 +147,26 @@
             </table>
         </div>
         <p id="wh-visits-empty" class="wh-empty" hidden>Sin visitas a clientes en el período.</p>
+        <h2 class="wh-h2">Tramos entre clientes</h2>
+        <div class="wh-table-wrap">
+            <table class="wh-table">
+                <thead>
+                <tr>
+                    <th>Fecha</th>
+                    <th>Vehículo</th>
+                    <th>Desde</th>
+                    <th>Hasta</th>
+                    <th>Salida</th>
+                    <th>Llegada</th>
+                    <th class="wh-num">Tiempo</th>
+                    <th class="wh-num">Km</th>
+                    <th></th>
+                </tr>
+                </thead>
+                <tbody id="wh-legs"></tbody>
+            </table>
+        </div>
+        <p id="wh-legs-empty" class="wh-empty" hidden>Sin tramos entre clientes en el período.</p>
     </section>
 
     <!-- ============ PLANILLAS ============ -->
