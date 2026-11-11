@@ -110,3 +110,4 @@
 #wh-tab-sheets .wh-table td { white-space: normal; }
 #wh-tab-sheets .wh-table td:first-child { white-space: nowrap; }
 .wh-input-sm { width: 100%; min-width: 160px; padding: 4px 6px; font: inherit; }
+.wh-card-danger { border-color: var(--wh-danger); }

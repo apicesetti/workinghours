@@ -134,6 +134,12 @@
             if (!cur) { throw { name: 'InvalidEntity', message: 'no existe ' + p.entity.id }; }
             cur.details = JSON.parse(JSON.stringify(p.entity.details)); return null;
         }
+        if (method === 'Remove' && p.typeName === 'AddInData') {
+            var n0 = db.AddInData.length;
+            db.AddInData = db.AddInData.filter(function (x) { return x.id !== p.entity.id; });
+            if (db.AddInData.length === n0) { throw { name: 'InvalidEntity', message: 'no existe ' + p.entity.id }; }
+            return null;
+        }
         if (method === 'Add' && p.typeName === 'Zone') {
             if (window.__denyZones) { throw { name: 'InvalidPermissionsException', message: 'Administer zones' }; }
             var z = JSON.parse(JSON.stringify(p.entity)); z.id = 'zN' + (seq++); db.Zone.push(z); return z.id;
