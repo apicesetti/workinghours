@@ -119,3 +119,10 @@
 .whd-ident-time { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .whd-idcard { background: var(--whd-card); border: 1px solid var(--whd-line); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
 .whd-idcard h2 { font-size: 18px; margin: 0 0 8px; font-weight: 500; }
+
+/* Drive (tema oscuro) pisa el fondo de los botones: se fija con el id (v1.4.3) */
+#whDrive .whd-btn:not(.whd-btn-ghost) { background: var(--whd-accent); border-color: var(--whd-accent); color: #fff; }
+#whDrive .whd-btn-ghost { background: transparent; color: var(--whd-accent); }
+@media (prefers-color-scheme: dark) { #whDrive .whd-btn:not(.whd-btn-ghost) { color: #10161d; } }
+#whDrive .whd-btn:disabled { opacity: .45; }
+.whd-dim { opacity: .7; }

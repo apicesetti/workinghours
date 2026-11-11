@@ -19,6 +19,7 @@
             { id: 'b6E', name: 'bnc@cesetti.com.ar', firstName: 'Braian', lastName: 'Coñequeo', isDriver: true, driverGroups: [{ id: 'b2B6F' }], employeeNo: '45390447' },
             { id: 'b57', name: 'ka@cesetti.com.ar', firstName: 'Kevin', lastName: 'Andrés', isDriver: true, driverGroups: [{ id: 'b2B6F' }], employeeNo: '40612799' },
             { id: 'b7E', name: 'mc@cesetti.com.ar', firstName: 'Mariano', lastName: 'Canales', isDriver: true, driverGroups: [{ id: 'b2B6F' }] },
+            { id: 'b2A8', name: 'conductor_test', firstName: 'Conductor', lastName: 'test', isDriver: true, driverGroups: [{ id: 'b2B6F' }] },
             { id: 'b41A', name: 'Llave_de_mantenimiento_AR', firstName: 'Llave de mantenimiento AR', lastName: '.', isDriver: true, driverGroups: [{ id: 'b28E3' }] },
             { id: 'b7B', name: 'aj@cesetti.com.ar', firstName: 'Agustin', lastName: 'Jara', isDriver: true, driverGroups: [{ id: 'b2B6F' }], activeTo: '2026-02-11T13:12:37Z' }
         ],
@@ -125,6 +126,7 @@
     }
     function exec(method, p) {
         window.__calls.push([method, p.typeName, JSON.parse(JSON.stringify(p))]);
+        if (method === 'Get' && p.typeName === 'DeviceStatusInfo') { return (window.__dsi || []).slice(); }
         if (method === 'Get') { return get(p); }
         if (method === 'Add' && p.typeName === 'AddInData') {
             var e = JSON.parse(JSON.stringify(p.entity)); e.id = 'aD' + (seq++); db.AddInData.push(e); return e.id;
@@ -144,7 +146,7 @@
             if (window.__denyZones) { throw { name: 'InvalidPermissionsException', message: 'Administer zones' }; }
             var z = JSON.parse(JSON.stringify(p.entity)); z.id = 'zN' + (seq++); db.Zone.push(z); return z.id;
         }
-        if (p.typeName === 'DeviceStatusInfo') { return []; }
+        if (p.typeName === 'DeviceStatusInfo') { return (window.__dsi || []).slice(); }
         throw { name: 'MethodNotSupported', message: method + ' ' + p.typeName };
     }
     window.__state = { online: true, device: 'b4', driving: false };
