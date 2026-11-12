@@ -23,6 +23,12 @@
  *                   la visita termina sola cuando el vehículo se va (próximo viaje).
  *   Geocerca pedida registro AddInData (type "zonereq") de 100 × 100 m alrededor de la llegada,
  *                   cuando el cliente no tiene geocerca cerca. La aprueba el supervisor en MyGeotab.
+ *   Presencia       registro AddInData (type "presence") por persona y día: tramos en los que su
+ *   (v1.6)          teléfono estuvo cerca o lejos del vehículo en el que figura. Solo el resultado
+ *                   de la comparación, nunca el recorrido.
+ *   Bajada          registro AddInData (type "leave"): el acompañante se bajó (automático cuando
+ *                   su teléfono se separa del vehículo, o a mano). Corta su tramo sin tocar el
+ *                   registro del chofer.
  *   Horas fuera     desde el inicio del primer viaje hasta el fin del último viaje de la
  *                   jornada, descontando las paradas intermedias dentro de una zona Base.
  *
@@ -41,11 +47,13 @@
     'use strict';
 
     var ADDIN_ID = 'aETg6OS_TD0uqoFHaLelHvg';
-    var VERSION = '1.5.1';
+    var VERSION = '1.6.0';
     var CREW = 'crew';
     var ACK = 'ack';
     var CLAIM = 'claim';
     var VISIT = 'visit';
+    var PRESENCE = 'presence';
+    var LEAVE = 'leave';
     var ZONEREQ = 'zonereq';
     var SETTINGS = 'settings';
     var UNKNOWN_DRIVER = 'UnknownDriverId';
@@ -68,6 +76,10 @@
         newZoneGroupIds: [],       // grupos de esas geocercas (vacío = grupo de la empresa)
         newZoneSize: 100,          // lado del cuadrado en metros
         nearZoneMeters: 300,       // una geocerca a menos de esto se sugiere en la llegada
+        presence: true,            // comparar la posición del teléfono con la del vehículo (v1.6)
+        nearMeters: 250,           // teléfono a menos de esto del vehículo = "con el vehículo"
+        leaveMeters: 800,          // acompañante a más de esto, con el vehículo en otro lado = se bajó
+        autoDetect: true,          // sumar solo al que viaja en un vehículo sin estar cargado
         sinceDate: '',             // AAAA-MM-DD: no se muestran jornadas anteriores (registros borrados)
         dataEpoch: '',             // ISO: momento del último borrado; los teléfonos descartan lo local anterior
         clients: []                // catálogo de clientes sin geocerca
@@ -850,6 +862,119 @@
         });
     }
 
+    // ------------------------------------------------------------------
+    // Presencia del teléfono respecto del vehículo (v1.6)
+    // ------------------------------------------------------------------
+    function presenceKey(date, userId) { return 'presence|' + date + '|' + userId; }
+
+    function newPresence(user, date) {
+        var now = new Date().toISOString();
+        return { type: PRESENCE, version: 1, key: presenceKey(date, user.id), date: date, userId: user.id, name: user.name || '',
+            segs: [],             // [[deviceId, desde ms, hasta ms, 'n' cerca | 'f' lejos]]
+            createdAt: now, updatedAt: now, history: [] };
+    }
+
+    /** Suma una lectura: extiende el último tramo si es el mismo vehículo y estado (hasta 12 min de hueco). */
+    function addPresence(rec, t, deviceId, near) {
+        var st = near ? 'n' : 'f';
+        var segs = rec.segs || (rec.segs = []);
+        var last = segs[segs.length - 1];
+        if (last && last[0] === deviceId && last[3] === st && t - last[2] <= 12 * MIN) { last[2] = t; }
+        else if (last && last[0] === deviceId && t - last[2] <= 12 * MIN) { last[2] = Math.max(last[2], t - 1); segs.push([deviceId, t, t, st]); }
+        else { segs.push([deviceId, t, t, st]); }
+        if (segs.length > 400) { segs.splice(0, segs.length - 400); }
+        return rec;
+    }
+
+    /**
+     * Cuánto estuvo el teléfono cerca / lejos de un vehículo en un intervalo (ms). Cada lectura vale
+     * hasta la siguiente (máximo 12 min).
+     */
+    function presenceIn(records, userId, deviceId, from, to) {
+        var near = 0, far = 0;
+        byType(records, PRESENCE).forEach(function (r) {
+            if (r.userId !== userId) { return; }
+            (r.segs || []).forEach(function (sg, i) {
+                if (sg[0] !== deviceId) { return; }
+                var nxt = r.segs[i + 1];
+                var end = Math.max(sg[2], Math.min(sg[2] + 12 * MIN, nxt ? nxt[1] : sg[2] + 3 * MIN));
+                var a = Math.max(sg[1], from), b = Math.min(end, to == null ? Infinity : to);
+                if (b > a) { if (sg[3] === 'n') { near += b - a; } else { far += b - a; } }
+            });
+        });
+        return { near: near, far: far };
+    }
+
+    /** 'ok' (el teléfono acompañó al vehículo), 'far' (estuvo mayormente lejos) o 'none' (sin lecturas). */
+    function corroboration(records, userId, deviceId, from, to) {
+        var p = presenceIn(records, userId, deviceId, from, to);
+        if (p.near + p.far < 5 * MIN) { return 'none'; }
+        return p.near >= p.far ? 'ok' : 'far';
+    }
+
+    function newLeave(crew, member, at, info) {
+        info = info || {};
+        var now = new Date().toISOString();
+        return {
+            type: LEAVE, version: 1, key: 'leave|' + crew.key + '|' + member.userId + '|' + toMs(member.from),
+            date: crew.date, crewKey: crew.key, userId: member.userId, name: member.name || '', memberFrom: member.from,
+            deviceId: member.deviceId || null, at: iso(toMs(at)), auto: !!info.auto, dist: info.dist == null ? null : Math.round(info.dist),
+            undone: false, createdAt: now, createdBy: info.by || '', updatedAt: now, updatedBy: info.by || '', history: []
+        };
+    }
+
+    /** Detección automática: viaja en el vehículo de otro sin estar cargado (queda aceptada; se puede deshacer). */
+    function newAutoClaim(user, driver, info) {
+        var c = newClaim(user, driver, info);
+        c.auto = true;
+        c.status = 'accepted';
+        c.deviceId = info.deviceId || null;
+        c.resolvedAt = c.createdAt;
+        c.resolvedBy = 'posición';
+        return c;
+    }
+
+    /**
+     * Tripulaciones como quedan con lo automático: suma a quien fue detectado por posición (o se
+     * sumó con "Viajo con…" y el chofer lo aceptó sin estar en la tripulación) y corta a quien se
+     * bajó. Devuelve copias; los registros originales no se tocan.
+     */
+    function effectiveCrews(records) {
+        var crews = {};
+        byType(records, CREW).forEach(function (c) { crews[c.key] = clone(c); if (c._id) { crews[c.key]._id = c._id; } });
+        byType(records, CLAIM).forEach(function (cl) {
+            if (!cl.auto || cl.status !== 'accepted') { return; }
+            var key = cl.date + '|' + cl.driverId;
+            var crew = crews[key] || (crews[key] = { type: CREW, key: key, date: cl.date, driverId: cl.driverId, driverName: cl.driverName,
+                deviceId: cl.deviceId, deviceIds: cl.deviceId ? [cl.deviceId] : [], deviceName: cl.deviceName || '', members: [], stops: [], virtual: true });
+            var t = toMs(cl.at);
+            var has = (crew.members || []).some(function (m) {
+                return m.userId === cl.userId && toMs(m.from) <= t + 15 * MIN && (!m.to || toMs(m.to) >= t);
+            });
+            if (!has) {
+                crew.members = crew.members || [];
+                crew.members.push({ userId: cl.userId, name: cl.name, from: cl.at, to: null, deviceId: cl.deviceId || null, viaClaim: cl.key, auto: true });
+            }
+        });
+        byType(records, LEAVE).forEach(function (l) {
+            if (l.undone) { return; }
+            var crew = crews[l.crewKey];
+            if (!crew) { return; }
+            (crew.members || []).forEach(function (m) {
+                if (m.userId !== l.userId || toMs(m.from) !== toMs(l.memberFrom)) { return; }
+                if (!m.to || toMs(m.to) > toMs(l.at)) { m.to = l.at; m.leave = l.key; m.autoLeave = !!l.auto; }
+            });
+        });
+        return Object.keys(crews).map(function (k) { return crews[k]; });
+    }
+
+    /** Registros con las tripulaciones reemplazadas por las efectivas. */
+    function withEffectiveCrews(records) {
+        return byType(records, CREW).length || byType(records, CLAIM).length
+            ? (records || []).filter(function (r) { return r && r.type !== CREW; }).concat(effectiveCrews(records))
+            : records;
+    }
+
     /** Envoltorio para AddInData (filtrable por type, date o key). */
     function wrap(rec) {
         return { type: rec.type, date: rec.date || '', key: rec.key || rec.type, rec: rec };
@@ -1299,7 +1424,7 @@
         var self = this;
         var wanted = {};
         dates.forEach(function (d) { wanted[d] = true; });
-        var keep = function (r) { return r && (r.type === CREW || r.type === ACK || r.type === CLAIM || r.type === VISIT || r.type === ZONEREQ) && wanted[r.date]; };
+        var keep = function (r) { return r && (r.type === CREW || r.type === ACK || r.type === CLAIM || r.type === VISIT || r.type === ZONEREQ || r.type === PRESENCE || r.type === LEAVE) && wanted[r.date]; };
         function viaAll() { return self.all().then(function (recs) { return dedupe(recs.filter(keep)); }); }
         if (!dates.length) { return Promise.resolve([]); }
         if (!self.whereOk) { return viaAll(); }
@@ -1469,7 +1594,7 @@
     }
 
     return {
-        ADDIN_ID: ADDIN_ID, VERSION: VERSION, CREW: CREW, ACK: ACK, CLAIM: CLAIM, VISIT: VISIT, ZONEREQ: ZONEREQ, SETTINGS: SETTINGS,
+        ADDIN_ID: ADDIN_ID, VERSION: VERSION, CREW: CREW, ACK: ACK, CLAIM: CLAIM, VISIT: VISIT, ZONEREQ: ZONEREQ, PRESENCE: PRESENCE, LEAVE: LEAVE, SETTINGS: SETTINGS,
         UNKNOWN_DRIVER: UNKNOWN_DRIVER, DEFAULT_SETTINGS: DEFAULT_SETTINGS, MIN: MIN, DAY: DAY,
         esc: esc, clone: clone, toMs: toMs, iso: iso, parseTimeSpan: parseTimeSpan,
         dayKey: dayKey, dayStart: dayStart, dayEnd: dayEnd, daysBetween: daysBetween, addDays: addDays,
@@ -1494,6 +1619,8 @@
         zoneCenter: zoneCenter, nearbyZones: nearbyZones, needsZone: needsZone, withVisits: withVisits, clientLegs: clientLegs,
         Store: Store, settingsRecord: settingsRecord, csv: csv, beforeEpoch: beforeEpoch, applyEpoch: applyEpoch,
         segKey: segKey, visibleSegments: visibleSegments, segmentOfMember: segmentOfMember, segMembers: segMembers,
-        segHasCrew: segHasCrew, pendingSegments: pendingSegments
+        segHasCrew: segHasCrew, pendingSegments: pendingSegments,
+        presenceKey: presenceKey, newPresence: newPresence, addPresence: addPresence, presenceIn: presenceIn, corroboration: corroboration,
+        newLeave: newLeave, newAutoClaim: newAutoClaim, effectiveCrews: effectiveCrews, withEffectiveCrews: withEffectiveCrews
     };
 }));

@@ -126,7 +126,11 @@
     }
     function exec(method, p) {
         window.__calls.push([method, p.typeName, JSON.parse(JSON.stringify(p))]);
-        if (method === 'Get' && p.typeName === 'DeviceStatusInfo') { return (window.__dsi || []).slice(); }
+        if (method === 'Get' && p.typeName === 'DeviceStatusInfo') {
+            var ds = (window.__dsi || []).slice();
+            if (p.search && p.search.deviceSearch) { ds = ds.filter(function (d) { return d.device.id === p.search.deviceSearch.id; }); }
+            return JSON.parse(JSON.stringify(ds));
+        }
         if (method === 'Get') { return get(p); }
         if (method === 'Add' && p.typeName === 'AddInData') {
             var e = JSON.parse(JSON.stringify(p.entity)); e.id = 'aD' + (seq++); db.AddInData.push(e); return e.id;

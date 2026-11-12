@@ -163,7 +163,11 @@ geotab.addin.workingHours = function () {
                 };
             });
             allRecs = recs;
-            items.forEach(function (it) { it.recV = S.withVisits(it.rec, it.timeline, recs); });
+            // con lo automático por posición (detectados, bajadas) y las llegadas a clientes
+            var eff = {};
+            S.effectiveCrews(recs).forEach(function (c) { eff[c.key] = c; });
+            S.annotateCrews(Object.keys(eff).map(function (k) { return eff[k]; }), recs);
+            items.forEach(function (it) { it.recV = S.withVisits(eff[it.jornada.key] || it.rec, it.timeline, recs); });
             setBusy(true, 'Leyendo odómetros…');
             return loadOdometers(items);
         }).then(function () {
@@ -312,16 +316,23 @@ geotab.addin.workingHours = function () {
     // Pestaña Jornadas
     // ------------------------------------------------------------------
     function crewText(it) {
-        if (!it.rec) { return ''; }
+        var rec = it.recV || it.rec;
+        if (!rec) { return ''; }
         var mark = { no: ' ✗ dijo que no viajaba', pending: ' · sin confirmar' };
-        var names = (it.rec.members || []).map(function (m) {
+        var names = (rec.members || []).map(function (m) {
             var sg = S.segmentOfMember(it.jornada, m);
             var to = m.to ? S.toMs(m.to) : (sg ? sg.to : null);
             var multi = (it.jornada.segments || []).length > 1;
+            // posición: ¿el teléfono acompañó al vehículo?
+            var dev = m.deviceId || it.jornada.deviceId;
+            var corr = S.corroboration(allRecs, m.userId, dev, S.toMs(m.from), to || Date.now());
+            var pos = corr === 'ok' ? ' ✓ con el vehículo' : corr === 'far' ? ' ⚠ lejos del vehículo' : '';
             return (m.name || uName(m.userId)) + (multi && m.deviceId ? ' en ' + dName(m.deviceId) : '')
-                + (m.to || (sg && multi) ? ' (' + S.hhmm(m.from) + '–' + S.hhmm(to) + ')' : '') + (mark[m._ack] || '');
+                + (m.to || (sg && multi) ? ' (' + S.hhmm(m.from) + '–' + S.hhmm(to) + ')' : '')
+                + (m.auto ? ' · detectado por posición' : '') + (m.autoLeave ? ' · bajada automática' : '')
+                + (m._ack === 'pending' && corr === 'ok' ? '' : (mark[m._ack] || '')) + pos;
         });
-        return names.length ? names.join(', ') : (it.rec.solo || (it.rec.soloSegs || []).length ? 'Solo' : '');
+        return names.length ? names.join(', ') : (rec.solo || (rec.soloSegs || []).length ? 'Solo' : '');
     }
 
     function missingStops(it) {
@@ -518,7 +529,12 @@ geotab.addin.workingHours = function () {
         var btn = $('#wh-m-save');
         btn.disabled = true;
         store.save(draft).then(function (saved) {
-            items.forEach(function (it) { if (it.jornada.key === modalKey) { it.rec = saved; it.recV = S.withVisits(saved, it.timeline, allRecs); } });
+            items.forEach(function (it) {
+                if (it.jornada.key !== modalKey) { return; }
+                it.rec = saved;
+                var e = S.effectiveCrews(allRecs.filter(function (r) { return r.key !== saved.key; }).concat([saved])).filter(function (c) { return c.key === saved.key; })[0];
+                it.recV = S.withVisits(e || saved, it.timeline, allRecs);
+            });
             closeModal();
             recompute();
             renderAll();
@@ -761,6 +777,12 @@ geotab.addin.workingHours = function () {
             + 'No cuentan: la jornada empieza al llegar al primer destino y termina al salir de la última parada de trabajo</label>'
             + '<label class="wh-check"><input type="radio" name="wh-commute" value="include"' + (settings.commute === 'include' ? ' checked' : '') + '> '
             + 'Cuentan: desde que sale de su casa hasta que llega</label></div>'
+            + '<div class="wh-card"><h3>Posición del teléfono</h3><p class="wh-muted">Compara cada pocos minutos la posición del teléfono con la del vehículo (mientras Drive está abierto). '
+            + 'Confirma solo a los acompañantes que van con el vehículo, baja a los que se quedaron y suma a quien viaja sin estar cargado. Se guarda solo si estuvo cerca o lejos, nunca el recorrido.</p>'
+            + '<label class="wh-check"><input type="checkbox" id="wh-s-pres"' + (settings.presence !== false ? ' checked' : '') + '> Usar la posición del teléfono</label>'
+            + '<label class="wh-check"><input type="checkbox" id="wh-s-autodet"' + (settings.autoDetect !== false ? ' checked' : '') + '> Sumar solo a quien viaja sin estar cargado</label>'
+            + '<label class="wh-field">"Con el vehículo" a menos de (metros) <input type="number" id="wh-s-near" min="50" max="1000" step="25" value="' + esc(settings.nearMeters || 250) + '"></label>'
+            + '<label class="wh-field">"Se bajó" a más de (metros) <input type="number" id="wh-s-leave" min="200" max="5000" step="50" value="' + esc(settings.leaveMeters || 800) + '"></label></div>'
             + '<div class="wh-card"><h3>Geocercas desde las llegadas</h3><p class="wh-muted">Cuando un técnico registra la llegada a un cliente sin geocerca cerca, se pide una. Se crean al aprobarlas en la pestaña Clientes.</p>'
             + '<label class="wh-field">Tipo de zona <select id="wh-s-nztype"><option value="">Sin tipo</option>' + zoneTypes.slice().sort(function (a, b) { return String(a.name).localeCompare(String(b.name), 'es'); }).map(function (t) {
                 return '<option value="' + esc(t.id) + '"' + (settings.newZoneTypeId === t.id ? ' selected' : '') + '>' + esc(zoneTypeName(t.id)) + '</option>';
@@ -802,6 +824,10 @@ geotab.addin.workingHours = function () {
         var sm = parseInt($('#wh-s-shortm').value, 10), smin = parseInt($('#wh-s-shortmin').value, 10);
         s.shortMoveMeters = isNaN(sm) ? S.DEFAULT_SETTINGS.shortMoveMeters : Math.max(0, sm);
         s.shortMoveMinutes = isNaN(smin) ? S.DEFAULT_SETTINGS.shortMoveMinutes : Math.max(0, smin);
+        s.presence = $('#wh-s-pres').checked;
+        s.autoDetect = $('#wh-s-autodet').checked;
+        s.nearMeters = Math.min(1000, Math.max(50, parseInt($('#wh-s-near').value, 10) || 250));
+        s.leaveMeters = Math.min(5000, Math.max(200, parseInt($('#wh-s-leave').value, 10) || 800));
         s.newZoneTypeId = $('#wh-s-nztype').value || '';
         s.newZoneSize = Math.min(1000, Math.max(30, parseInt($('#wh-s-nzsize').value, 10) || 100));
         s.nearZoneMeters = Math.min(2000, Math.max(50, parseInt($('#wh-s-nznear').value, 10) || 300));

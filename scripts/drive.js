@@ -259,7 +259,13 @@ var factory = function () {
     // ------------------------------------------------------------------
     // Sincronización
     // ------------------------------------------------------------------
+    // Un solo guardado a la vez: dos guardados en paralelo del mismo registro nuevo lo duplicaban.
+    var flushChain = Promise.resolve();
     function flush() {
+        flushChain = flushChain.then(doFlush, doFlush);
+        return flushChain;
+    }
+    function doFlush() {
         if (!isOnline()) { return Promise.resolve(); }
         var keys = Object.keys(records).filter(function (k) { return records[k] && records[k]._dirty; });
         var lastError = null;
@@ -311,7 +317,7 @@ var factory = function () {
     }
 
     function allRecords() { return Object.keys(records).map(function (k) { return records[k]; }).filter(Boolean); }
-    function myInvites() { return me ? S.invitesFor(me.id, allRecords()).filter(function (i) { return i.crew.date >= S.addDays(today(), -1); }) : []; }
+    function myInvites() { return me ? S.invitesFor(me.id, effRecords()).filter(function (i) { return i.crew.date >= S.addDays(today(), -1) && !i.member.to; }) : []; }
     function myClaimsToResolve() { return me ? S.claimsFor(me.id, allRecords()) : []; }
     function pendingActions() {
         var n = myInvites().length + myClaimsToResolve().length;
@@ -344,6 +350,14 @@ var factory = function () {
                 (i.crew.driverName || 'Un chofer') + ' te cargó como acompañante' + (i.crew.deviceName ? ' en ' + i.crew.deviceName : '')
                 + ' desde las ' + S.hhmm(i.member.from) + '. Abrí ' + APP + ' y confirmá.');
         });
+        // detectado por posición en mi vehículo: solo aviso (ya cuenta)
+        allRecords().forEach(function (c) {
+            if (c.type !== S.CLAIM || !c.auto || c.status !== 'accepted' || !me || c.driverId !== me.id || c.date !== day) { return; }
+            var k = 'auto|' + c.key;
+            if (notified[k]) { return; }
+            notified[k] = Date.now();
+            notify(c.name + ' viaja con vos', 'Lo detectamos por su teléfono' + (c.deviceName ? ' en ' + c.deviceName : '') + ' desde las ' + S.hhmm(c.at) + '. Ya quedó en tu tripulación.');
+        });
         // alguien dice que viaja conmigo: confirmar o rechazar
         myClaimsToResolve().forEach(function (c) {
             var k = 'clm|' + c.key;
@@ -361,7 +375,7 @@ var factory = function () {
         if (timer) { return; }
         var every = Math.max(1, settings.pollMinutes || 2) * 60000;
         timer = setInterval(function () {
-            check().then(function () {
+            check().then(presenceTick).then(function () {
                 if (root && view.name === 'home') { render(); }
                 if (root && view.name === 'clients') { loadClientTimelines().then(function () { if (view.name === 'clients') { render(); } }); }
             }).catch(function () { /* reintenta */ });
@@ -376,6 +390,185 @@ var factory = function () {
                 });
             } catch (e) { listening = false; }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Tripulaciones efectivas: con lo detectado por posición y las bajadas automáticas (v1.6)
+    // ------------------------------------------------------------------
+    function effRecords() { return S.withEffectiveCrews(allRecords()); }
+    function effCrew(key) {
+        return S.effectiveCrews(allRecords()).filter(function (c) { return c.key === key; })[0] || records[key] || null;
+    }
+
+    // ------------------------------------------------------------------
+    // Presencia: el teléfono comparado con el vehículo (v1.6)
+    //   - guarda solo si estuvo cerca o lejos (registro "presence"), nunca el recorrido
+    //   - acompañante cerca con el vehículo en marcha: confirma solo ("Sí, viajo")
+    //   - acompañante lejos con el vehículo en otro lado: lo baja solo (se puede deshacer)
+    //   - alguien sin vehículo cuyo teléfono viaja con uno: lo suma solo (se puede deshacer)
+    // ------------------------------------------------------------------
+    var lastPresence = 0;
+    var fleet = { at: 0, list: [] };
+
+    function phonePos() {
+        var geo = (api && api.mobile && api.mobile.geolocation) || (typeof navigator !== 'undefined' && navigator.geolocation);
+        return new Promise(function (resolve) {
+            if (!geo || typeof geo.getCurrentPosition !== 'function') { resolve(null); return; }
+            var t = setTimeout(function () { resolve(null); }, 20000);
+            try {
+                geo.getCurrentPosition(function (p) {
+                    clearTimeout(t);
+                    resolve({ lat: p.coords.latitude, lon: p.coords.longitude, acc: p.coords.accuracy || 0 });
+                }, function () { clearTimeout(t); resolve(null); }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
+            } catch (e) { clearTimeout(t); resolve(null); }
+        });
+    }
+    function dist(a, b) { return S.distanceMeters({ x: a.lon, y: a.lat }, { x: b.lon, y: b.lat }); }
+
+    function dsiOf(list) {
+        return (list || []).map(function (d) {
+            return { deviceId: S.idOf(d.device), driverId: S.idOf(d.driver), lat: d.latitude, lon: d.longitude, driving: !!d.isDriving };
+        }).filter(function (d) { return d.deviceId && d.lat != null; });
+    }
+    function vehicleNow(deviceId) {
+        return call('Get', { typeName: 'DeviceStatusInfo', search: { deviceSearch: { id: deviceId } },
+            propertySelector: { fields: ['device', 'driver', 'latitude', 'longitude', 'isDriving'], isIncluded: true } })
+            .then(function (l) { return dsiOf(l)[0] || null; });
+    }
+    function fleetNow() {
+        if (Date.now() - fleet.at < 60000) { return Promise.resolve(fleet.list); }
+        return call('Get', { typeName: 'DeviceStatusInfo', search: {},
+            propertySelector: { fields: ['device', 'driver', 'latitude', 'longitude', 'isDriving'], isIncluded: true } })
+            .then(function (l) { fleet = { at: Date.now(), list: dsiOf(l) }; return fleet.list; });
+    }
+
+    /** En qué vehículo estoy ahora según lo cargado: como chofer (tramo abierto) o como acompañante. */
+    function myContext() {
+        var seg = myOpenSegment();
+        if (seg) { return { role: 'driver', deviceId: seg.deviceId }; }
+        var now = Date.now(), day = today(), out = null;
+        S.effectiveCrews(allRecords()).forEach(function (c) {
+            if (c.date !== day || !me || c.driverId === me.id) { return; }
+            (c.members || []).forEach(function (m) {
+                if (m.userId !== me.id || (m.to && S.toMs(m.to) <= now)) { return; }
+                out = { role: 'companion', crew: c, member: m, deviceId: m.deviceId || c.deviceId };
+            });
+        });
+        return out || { role: 'none' };
+    }
+
+    function savePresence(deviceId, near) {
+        var key = S.presenceKey(today(), me.id);
+        var rec = records[key] ? S.clone(records[key]) : S.newPresence(me, today());
+        if (records[key] && records[key]._id) { rec._id = records[key]._id; }
+        S.addPresence(rec, Date.now(), deviceId, near);
+        rec.updatedAt = new Date().toISOString();
+        rec._dirty = true;
+        records[key] = rec;
+        saveRecordsLocal();
+    }
+
+    function presenceTick(force) {
+        if (!settings.presence || !me || !isOnline()) { return Promise.resolve(); }
+        var now = Date.now();
+        if (force !== true && now - lastPresence < Math.max(1, settings.pollMinutes || 2) * S.MIN - 5000) { return Promise.resolve(); }
+        lastPresence = now;
+        var ctx = myContext();
+        return phonePos().then(function (pos) {
+            if (!pos || pos.acc > 300) { return null; }
+            var prev = lsGet('lastPos', null);
+            lsSet('lastPos', { lat: pos.lat, lon: pos.lon, t: now });
+            var kmh = prev && now - prev.t > 30000 && now - prev.t < 15 * S.MIN ? dist(prev, pos) / ((now - prev.t) / 3600000) / 1000 : 0;
+            if (ctx.deviceId) {
+                return Promise.all([vehicleNow(ctx.deviceId), loadDeviceNames([ctx.deviceId]).catch(function () {})])
+                    .then(function (r) { if (r[0]) { return withVehicle(ctx, pos, r[0], now); } });
+            }
+            if (settings.autoDetect !== false && kmh >= 15) { return detectRide(pos, now); }
+            lsSet('ride', null);
+            return null;
+        }).then(function () { return flush(); }).catch(function () { /* se reintenta en la próxima */ });
+    }
+
+    function withVehicle(ctx, pos, v, now) {
+        var d = dist(pos, v);
+        var near = d <= (settings.nearMeters || 250) + Math.min(pos.acc || 0, 100);
+        savePresence(ctx.deviceId, near);
+        if (near) { lsSet('lastNear', now); }
+        if (ctx.role !== 'companion') { return; }
+        var c = ctx.crew, m = ctx.member;
+        var vehName = devices[ctx.deviceId] || 'el vehículo';
+        var deVeh = devices[ctx.deviceId] ? 'de ' + devices[ctx.deviceId] : 'del vehículo';
+        // confirmación automática: va con el vehículo en marcha
+        if (near && v.driving && S.memberStatus(c, m, S.ackIndex(allRecords())) === 'pending') {
+            var ack = S.newAck(c, me, 'ok', 'posición');
+            ack.auto = true;
+            saveLocal(ack, 'ack', 'automática');
+            notify('Viajás con ' + (c.driverName || 'el chofer'), 'Lo confirmamos solo: tu teléfono va con ' + vehName + '.');
+        }
+        // bajada automática: lejos del vehículo y el vehículo en otro lado (o andando)
+        var far = d > (settings.leaveMeters || 800) + Math.min(pos.acc || 0, 100);
+        var st = lsGet('leaveStreak', null);
+        if (!far) { lsSet('leaveStreak', null); return; }
+        // se bajó entre la última lectura cerca y la primera lejos: se toma la primera lejos
+        if (!st || st.crewKey !== c.key || st.from !== m.from) { st = { crewKey: c.key, from: m.from, since: now, n: 0 }; }
+        st.n++;
+        lsSet('leaveStreak', st);
+        if (st.n < 2) { return; }
+        lsSet('leaveStreak', null);
+        var at = Math.max(S.toMs(m.from) + S.MIN, st.since);
+        var lv = S.newLeave(c, m, at, { auto: true, dist: d, by: 'posición' });
+        saveLocal(lv, 'leave', 'automática');
+        notify('Te bajaste ' + deVeh, 'Lo registramos solo a las ' + S.hhmm(at) + ' (estás a ' + (d >= 1000 ? (d / 1000).toFixed(1).replace('.', ',') + ' km' : Math.round(d) + ' m')
+            + '). Si seguís a bordo, abrí ' + APP + ' y tocá Deshacer.');
+    }
+
+    /** Sin vehículo cargado y el teléfono en movimiento: ¿va con algún vehículo en marcha? */
+    function detectRide(pos, now) {
+        return fleetNow().then(function (list) {
+            var best = null;
+            list.forEach(function (v) {
+                if (!v.driving || !v.driverId || v.driverId === 'UnknownDriverId' || v.driverId === me.id) { return; }
+                var d = dist(pos, v);
+                if (d <= (settings.nearMeters || 250) + Math.min(pos.acc || 0, 100) && (!best || d < best.d)) { best = { v: v, d: d }; }
+            });
+            var st = lsGet('ride', null);
+            if (!best) { lsSet('ride', null); return; }
+            if (!st || st.deviceId !== best.v.deviceId) { st = { deviceId: best.v.deviceId, driverId: best.v.driverId, since: now, n: 0 }; }
+            st.n++;
+            lsSet('ride', st);
+            if (st.n < 3) { return; }   // ~3 lecturas seguidas juntos y en movimiento
+            lsSet('ride', null);
+            var drv = operators.filter(function (o) { return o.id === st.driverId; })[0] || { id: st.driverId, name: 'otro chofer' };
+            return loadDeviceNames([st.deviceId]).then(function () {
+                var cl = S.newAutoClaim(me, { id: drv.id, name: drv.name }, { at: st.since, deviceId: st.deviceId, deviceName: devices[st.deviceId] || '', by: 'posición' });
+                saveLocal(cl, 'claim', 'automática');
+                notify('Viajás con ' + drv.name, 'Te sumamos solo como acompañante en ' + (devices[st.deviceId] || 'su vehículo') + ' desde las ' + S.hhmm(st.since)
+                    + '. Si no es así, abrí ' + APP + ' y tocá Deshacer.');
+            });
+        });
+    }
+
+    /** Lo automático de hoy que puedo deshacer. */
+    function myAutoItems() {
+        if (!me) { return []; }
+        var day = today();
+        var out = [];
+        allRecords().forEach(function (r) {
+            if (r.date !== day || r.userId !== me.id) { return; }
+            if (r.type === S.CLAIM && r.auto && r.status === 'accepted') { out.push({ r: r, text: 'Te sumamos a ' + (r.deviceName || 'un vehículo') + ' con ' + r.driverName + ' desde las ' + S.hhmm(r.at) }); }
+            if (r.type === S.LEAVE && r.auto && !r.undone) { out.push({ r: r, text: 'Te bajamos de ' + (devices[r.deviceId] || 'el vehículo') + ' a las ' + S.hhmm(r.at) }); }
+        });
+        return out;
+    }
+    function undoAuto(key) {
+        var r = records[key];
+        if (!r) { return; }
+        var c = S.clone(r);
+        if (r._id) { c._id = r._id; }
+        if (c.type === S.CLAIM) { c.status = 'rejected'; c.resolvedBy = by(); c.resolvedAt = S.iso(Date.now()); }
+        if (c.type === S.LEAVE) { c.undone = true; }
+        saveLocal(c, 'undo', 'automático');
+        render();
     }
 
     // ------------------------------------------------------------------
@@ -449,7 +642,7 @@ var factory = function () {
             }
             var open = segOpen(j, sg);
             var p = plateOf(sg.deviceId || j.deviceId);
-            var rec = records[j.key];
+            var rec = effCrew(j.key);
             var mem = S.segMembers(rec, sg);
             var idx = S.ackIndex(all);
             var crew;
@@ -457,7 +650,7 @@ var factory = function () {
                 crew = mem.map(function (m) {
                     var st = rec ? S.memberStatus(rec, m, idx) : 'pending';
                     var cls = st === 'no' ? 'whd-pill-warn' : st === 'ok' ? 'whd-pill-ok' : '';
-                    return '<span class="whd-pill ' + cls + '">' + esc(m.name) + (m.to && (!open || S.toMs(m.to) < now) ? ' (hasta ' + S.hhmm(m.to) + ')' : '')
+                    return '<span class="whd-pill ' + cls + '">' + esc(m.name) + (m.auto ? ' · automático' : '') + (m.to && (!open || S.toMs(m.to) < now) ? ' (hasta ' + S.hhmm(m.to) + ')' : '')
                         + (st === 'no' ? ' · dijo que no' : st === 'pending' ? ' · sin confirmar' : '') + '</span>';
                 }).join(' ');
             } else if (S.segHasCrew(rec, sg)) { crew = '<span class="whd-pill">Viajó solo</span>'; }
@@ -474,6 +667,13 @@ var factory = function () {
 
     function renderAsks() {
         var html = '';
+        var autos = myAutoItems();
+        if (autos.length) {
+            html += '<article class="whd-card"><h2>Registrado automáticamente</h2><p class="whd-sub">Por la posición de tu teléfono. Si algo no es así, deshacelo.</p><ul class="whd-list">'
+                + autos.map(function (a) {
+                    return '<li><span>' + esc(a.text) + '</span><button class="whd-btn whd-btn-sm whd-btn-ghost" data-act="undoAuto" data-key="' + esc(a.r.key) + '">Deshacer</button></li>';
+                }).join('') + '</ul></article>';
+        }
         myInvites().forEach(function (i) {
             html += '<article class="whd-card whd-card-ask">'
                 + '<h2>¿Viajás con ' + esc(i.crew.driverName || 'este chofer') + '?</h2>'
@@ -496,6 +696,44 @@ var factory = function () {
         return html;
     }
 
+    /** Mis viajes de acompañante de hoy (tripulaciones de otros donde figuro). */
+    function renderMyRides() {
+        if (!me) { return ''; }
+        var day = today(), now = Date.now();
+        var all = allRecords(), idx = S.ackIndex(all);
+        var rows = [];
+        S.effectiveCrews(all).forEach(function (c) {
+            if (c.date !== day || c.driverId === me.id) { return; }
+            (c.members || []).forEach(function (m) {
+                if (m.userId !== me.id || S.memberStatus(c, m, idx) === 'no') { return; }
+                rows.push({ c: c, m: m });
+            });
+        });
+        if (!rows.length) { return ''; }
+        rows.sort(function (a, b) { return S.toMs(a.m.from) - S.toMs(b.m.from); });
+        return '<article class="whd-idcard"><h2>Mis viajes de acompañante</h2><ul class="whd-list whd-idents">' + rows.map(function (r) {
+            var open = !r.m.to || S.toMs(r.m.to) > now;
+            var dev = r.m.deviceId || r.c.deviceId;
+            var p = plateOf(dev);
+            var corr = S.corroboration(all, me.id, dev, S.toMs(r.m.from), open ? now : S.toMs(r.m.to));
+            var tag = r.m.auto ? 'detectado por tu teléfono' : corr === 'ok' ? 'confirmado por tu teléfono' : corr === 'far' ? 'tu teléfono estuvo lejos' : '';
+            return '<li class="whd-ident"><div class="whd-ident-row"><span><b>' + esc(p.plate) + '</b><small>con ' + esc(r.c.driverName || 'otro chofer') + '</small></span>'
+                + '<span class="whd-ident-time">' + S.hhmm(r.m.from) + ' – ' + (open ? '<b>ahora</b>' : S.hhmm(r.m.to))
+                + '<small>' + S.fmtDuration((open ? now : S.toMs(r.m.to)) - S.toMs(r.m.from)) + '</small></span></div>'
+                + '<div class="whd-ident-crew">' + (tag ? '<span class="whd-pill' + (corr === 'far' ? ' whd-pill-warn' : ' whd-pill-ok') + '">' + tag + '</span>' : '')
+                + (open ? '<button class="whd-btn whd-btn-sm whd-btn-ghost" data-act="leave" data-key="' + esc(r.c.key) + '" data-from="' + esc(r.m.from) + '">Me bajé</button>' : '')
+                + '</div></li>';
+        }).join('') + '</ul></article>';
+    }
+
+    function leaveNow(crewKey, from) {
+        var c = effCrew(crewKey);
+        var m = c && (c.members || []).filter(function (x) { return x.userId === me.id && x.from === from; })[0];
+        if (!m) { return; }
+        saveLocal(S.newLeave(c, m, Date.now(), { by: by() }), 'leave', 'a mano').then(render);
+        render();
+    }
+
     function renderMyClaims() {
         if (!me) { return ''; }
         var mine = S.claimsBy(me.id, allRecords()).filter(function (c) { return c.date === today(); }).slice(0, 3);
@@ -516,12 +754,14 @@ var factory = function () {
         var day = today();
         var list = jornadas.slice().sort(function (a, b) { return b.firstAt - a.firstAt; });
         var asks = renderAsks();
+        var rides = renderMyRides();
         if (!list.length) {
-            return asks + renderMyClaims() + '<div class="whd-empty"><p><b>Sin identificaciones hoy.</b></p>'
-                + '<p>Cuando pases el llavero o la cámara te identifique en un vehículo, te vamos a avisar para que cargues quién viaja con vos.</p></div>'
+            return asks + rides + renderMyClaims() + (rides ? '' : '<div class="whd-empty"><p><b>Sin identificaciones hoy.</b></p>'
+                + '<p>Cuando pases el llavero o la cámara te identifique en un vehículo, te vamos a avisar para que cargues quién viaja con vos. '
+                + 'Si viajás de acompañante, se registra solo por la posición de tu teléfono.</p></div>')
                 + claimButton();
         }
-        return asks + renderIdentifications() + list.map(function (j) {
+        return asks + renderIdentifications() + rides + list.map(function (j) {
             var rec = records[j.key];
             var pend = S.pendingSegments(j, rec).length;
             var crew = pend ? '<span class="whd-pill whd-pill-warn">' + (pend === 1 ? '1 vehículo sin tripulación' : pend + ' vehículos sin tripulación') + '</span>' : '';
@@ -557,7 +797,7 @@ var factory = function () {
         var j = x.j, sg = x.sg;
         var rec = recordFor(j);
         var open = segOpen(j, sg);
-        var mem = S.segMembers(rec, sg);
+        var mem = S.segMembers(effCrew(j.key) || rec, sg);
         var current = open ? mem.filter(function (m) { return !m.to; }) : mem;
         var currentIds = {};
         current.forEach(function (m) { currentIds[m.userId] = true; });
@@ -649,6 +889,20 @@ var factory = function () {
         var open = segOpen(x.j, x.sg);
         var inSeg = S.segMembers(rec, x.sg);
         var name = '';
+        // sumado automáticamente (no está en mi registro): se baja con un registro aparte
+        var auto = S.segMembers(effCrew(x.j.key), x.sg).filter(function (m) { return m.userId === userId && m.auto && !inSeg.some(function (y) { return y.userId === userId; }); })[0];
+        if (auto) {
+            var cl = records[auto.viaClaim];
+            if (open || !cl) {
+                saveLocal(S.newLeave(effCrew(x.j.key), auto, Date.now(), { by: by() }), 'drop', auto.name).then(render);
+            } else {
+                var c2 = S.clone(cl); if (cl._id) { c2._id = cl._id; }
+                c2.status = 'rejected'; c2.resolvedBy = by(); c2.resolvedAt = S.iso(Date.now());
+                saveLocal(c2, 'drop', auto.name).then(render);
+            }
+            render();
+            return;
+        }
         if (open) {
             rec.members.forEach(function (m) { if (m.userId === userId && !m.to && inSeg.indexOf(m) >= 0) { m.to = S.iso(Date.now()); name = m.name; } });
         } else {
@@ -824,8 +1078,8 @@ var factory = function () {
     function todayJornadas() {
         var day = today();
         var list = jornadas.filter(function (j) { return j.date === day; }).map(function (j) { return { j: j, role: 'driver' }; });
-        allRecords().forEach(function (r) {
-            if (r.type !== S.CREW || r.date !== day || !me || r.driverId === me.id) { return; }
+        S.effectiveCrews(allRecords()).forEach(function (r) {
+            if (r.date !== day || !me || r.driverId === me.id) { return; }
             var m = (r.members || []).filter(function (x) { return x.userId === me.id; })[0];
             if (!m || S.memberStatus(r, m, S.ackIndex(allRecords())) === 'no') { return; }
             list.push({ role: 'companion', member: m, j: { key: r.key, date: r.date, driverId: r.driverId, deviceId: r.deviceId,
@@ -1342,6 +1596,8 @@ var factory = function () {
             else if (act === 'sheet') { go('sheet', key); }
             else if (act === 'confirmSheet') { confirmSheet(); }
             else if (act === 'ack') { saveAck(key, b.getAttribute('data-status')); }
+            else if (act === 'undoAuto') { undoAuto(key); }
+            else if (act === 'leave') { leaveNow(key, b.getAttribute('data-from')); }
             else if (act === 'checkin') { startCheckin(); }
             else if (act === 'sec') { section = key === 'clients' ? 'clients' : 'crew'; go('home'); }
             else if (act === 'checkinSave') { saveCheckin(b.getAttribute('data-name'), b.getAttribute('data-zone'), b.getAttribute('data-new') === '1'); }
@@ -1429,7 +1685,9 @@ var factory = function () {
             section = name === 'clients' ? 'clients' : 'crew';
             go('home');
         },
-        refresh: function () { return refresh(true, true); }
+        refresh: function () { return refresh(true, true); },
+        /** Para pruebas: una lectura de presencia ya. */
+        _presence: function () { return presenceTick(true).then(render); }
     };
 };
 // Dentro del add-in unificado "Mi jornada" (window.CESETTI_SHELL) lo registra el contenedor;
