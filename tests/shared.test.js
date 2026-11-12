@@ -607,3 +607,42 @@ test('después de "Empezar de cero" no se muestran identificaciones anteriores (
     assert.equal(S.applyEpoch(js, { dataEpoch: new Date(t(16, 0)).toISOString() }).length, 0);
     assert.equal(js[0].segments.length, 2, 'no modifica el original');
 });
+
+test('presencia, bajada automática y detección por posición (v1.6)', () => {
+    const t = (h, m) => new Date(2026, 10, 12, h, m).getTime();
+    const p = S.newPresence({ id: 'u', name: 'U' }, '2026-11-12');
+    [[9, 0, true], [9, 3, true], [9, 6, true], [9, 9, false], [9, 12, false]].forEach(([h, m, n]) => S.addPresence(p, t(h, m), 'IU', n));
+    assert.deepEqual(p.segs.map(s => s[3]), ['n', 'f']);
+    const pr = S.presenceIn([p], 'u', 'IU', t(9, 0), t(9, 20));
+    assert.equal(pr.near, 9 * M);
+    assert.ok(pr.far >= 6 * M);
+    assert.equal(S.corroboration([p], 'u', 'IU', t(9, 0), t(9, 8)), 'ok');
+    assert.equal(S.corroboration([p], 'u', 'IU', t(9, 9), t(9, 20)), 'far');
+    assert.equal(S.corroboration([p], 'u', 'BV', t(9, 0), t(9, 20)), 'none');
+    // tripulación de Juan en IU con María; María se baja sola a las 11:20
+    const j = { key: '2026-11-12|d', date: '2026-11-12', driverId: 'd', deviceId: 'IU', firstAt: t(9, 0), segments: [{ deviceId: 'IU', from: t(9, 0), to: t(13, 0) }] };
+    const crew = S.newCrewRecord(j, { driverName: 'Juan' });
+    crew.members = [{ userId: 'm', name: 'María', from: new Date(t(9, 0)).toISOString(), to: null, deviceId: 'IU' }];
+    const lv = S.newLeave(crew, crew.members[0], t(11, 20), { auto: true, dist: 1200 });
+    let eff = S.effectiveCrews([crew, lv]);
+    assert.equal(S.toMs(eff[0].members[0].to), t(11, 20));
+    assert.equal(crew.members[0].to, null, 'el registro del chofer no se toca');
+    assert.deepEqual(S.participants(j, eff[0]).filter(x => x.role === 'companion').map(x => x.to), [t(11, 20)]);
+    // deshacer
+    lv.undone = true;
+    assert.equal(S.effectiveCrews([crew, lv])[0].members[0].to, null);
+    // Pedro detectado por posición viajando en IU desde las 10:00 (sin tripulación cargada por el chofer)
+    const cl = S.newAutoClaim({ id: 'p', name: 'Pedro' }, { id: 'd', name: 'Juan' }, { at: t(10, 0), deviceId: 'IU', deviceName: 'IU' });
+    assert.equal(cl.status, 'accepted');
+    eff = S.effectiveCrews([crew, cl]);
+    const ped = eff[0].members.filter(m => m.userId === 'p')[0];
+    assert.ok(ped && ped.auto && ped.deviceId === 'IU' && S.memberStatus(eff[0], ped, {}) === 'ok');
+    assert.equal(S.invitesFor('p', S.withEffectiveCrews([crew, cl])).length, 0, 'detectado: no hace falta que confirme');
+    // sin tripulación del chofer: se arma una virtual
+    const eff2 = S.effectiveCrews([cl]);
+    assert.equal(eff2.length, 1);
+    assert.equal(eff2[0].key, '2026-11-12|d');
+    // rechazado (deshecho): no cuenta
+    cl.status = 'rejected';
+    assert.equal(S.effectiveCrews([crew, cl])[0].members.length, 1);
+});

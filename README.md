@@ -1,4 +1,4 @@
-# Horas de trabajo — Add-ins Geotab Drive + MyGeotab · v1.4
+# Horas de trabajo — Add-ins Geotab Drive + MyGeotab · v1.6
 
 Seguimiento de las **horas fuera de la oficina de todos los operarios**, aunque no manejen, y de los **clientes visitados** en cada parada.
 
@@ -108,6 +108,19 @@ recs = api.get("AddInData", search={"addInId": "aETg6OS_TD0uqoFHaLelHvg",
 tripulaciones = [r["details"] for r in recs if r["details"]["type"] == "crew"]
 ```
 
+## Automático por posición del teléfono (v1.6)
+
+Mientras Drive está abierto, cada `pollMinutes` el teléfono compara su posición con la del vehículo en el que figura (como chofer o acompañante). **Se guarda solo el resultado** (cerca / lejos de tal vehículo, registro `presence` por persona y día), nunca el recorrido.
+
+| Situación | Qué hace solo |
+|---|---|
+| Acompañante cargado, sin responder, y su teléfono va con el vehículo en marcha | Confirma "Sí, viajo" (registro `ack` con `auto`). |
+| Acompañante cuyo teléfono queda a más de 800 m del vehículo (2 lecturas seguidas) | Lo baja a esa hora (registro `leave` con `auto`). Aviso con **Deshacer**. |
+| Alguien sin vehículo cuyo teléfono viaja junto a un vehículo en marcha (3 lecturas, > 15 km/h) | Lo suma como acompañante de ese chofer (registro `claim` con `auto`, ya aceptado). Aviso a los dos; **Deshacer** para el acompañante, "Se bajó/Quitar" para el chofer. |
+| Acompañante | Ve "Mis viajes de acompañante" con desde–hasta, si su teléfono lo confirma y **Me bajé**. |
+
+El registro del chofer no se toca: lo automático se arma al calcular (`effectiveCrews`). El panel muestra por acompañante "✓ con el vehículo", "⚠ lejos del vehículo", "detectado por posición" y "bajada automática". Se configura en *Configuración → Posición del teléfono*. En iOS solo funciona con Drive abierto.
+
 ## Empezar de cero
 
 *Configuración → Empezar de cero* (hay que escribir BORRAR) elimina todos los registros del add-in —tripulaciones, confirmaciones, declaraciones, llegadas, geocercas pedidas y planillas confirmadas— y **conserva la configuración**. Las geocercas ya creadas en MyGeotab no se tocan. Desde ese día no se muestran jornadas anteriores (`sinceDate`), y los teléfonos descartan lo que tenían sin sincronizar de antes del borrado (`dataEpoch`), para que no se vuelva a subir. Se necesita permiso para borrar datos de add-ins.
@@ -120,7 +133,7 @@ Todo lo que carga el chofer se guarda primero en el teléfono y se sincroniza cu
 
 ```bash
 TZ=America/Argentina/Buenos_Aires node --test tests/*.test.js   # lógica (21 tests)
-cd tests/e2e && python3 run_drive.py && python3 run_panel.py && python3 run_sync_error.py && python3 run_companions.py && python3 run_clients.py && python3 run_reset.py   # navegador (requiere playwright)
+cd tests/e2e && python3 run_drive.py && python3 run_panel.py && python3 run_sync_error.py && python3 run_companions.py && python3 run_clients.py && python3 run_reset.py && python3 run_presence.py   # navegador (requiere playwright)
 ```
 
 Los tests de lógica usan datos reales de intcesetti del 28/10/2026: una llave de mantenimiento que corta la jornada de Canales en WP, y los viajes y odómetros de Falcon en OE para la planilla. Los recorridos en navegador fijan el reloj a las 18:30 para no depender de la hora en que se corren.
