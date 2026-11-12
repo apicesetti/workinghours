@@ -47,7 +47,7 @@
     'use strict';
 
     var ADDIN_ID = 'aETg6OS_TD0uqoFHaLelHvg';
-    var VERSION = '1.6.0';
+    var VERSION = '1.6.1';
     var CREW = 'crew';
     var ACK = 'ack';
     var CLAIM = 'claim';

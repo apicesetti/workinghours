@@ -1104,6 +1104,8 @@ geotab.addin.workingHours = function () {
             api = freshApi;
             root = document.getElementById('workingHours');
             store = new S.Store(call, multiCall);
+            var ver = document.getElementById('wh-ver');
+            if (ver) { ver.textContent = 'v' + S.VERSION; }
             if (!bound) {
                 bindEvents();
                 bound = true;

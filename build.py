@@ -7,6 +7,7 @@ Son dos add-ins separados para que onStartup/onShutdown solo apliquen a Drive:
 Uso: python build.py [URL_BASE_HOSTING]
 """
 import json
+import re
 import pathlib
 import sys
 
@@ -16,7 +17,9 @@ DIST.mkdir(exist_ok=True)
 
 BASE_URL = (sys.argv[1] if len(sys.argv) > 1
             else "https://apicesetti.github.io/workinghours").rstrip("/")
-VERSION = "1.4.3"
+# Una sola fuente de la versión: scripts/shared.js (VERSION). Se usa en las configuraciones y en
+# los ?v= de los HTML, para que el navegador y Drive no mezclen archivos de versiones distintas.
+VERSION = re.search(r"var VERSION = '([0-9.]+)'", (ROOT / "scripts" / "shared.js").read_text(encoding="utf-8")).group(1)
 MENU = {"es": "Horas de trabajo", "en": "Working hours"}
 
 mygeotab = {
@@ -48,6 +51,13 @@ drive = {
     "onStartup": True,
     "onShutdown": True,
 }
+
+for html in ("workingHours.html", "workingHoursDrive.html"):
+    f = ROOT / html
+    txt = f.read_text(encoding="utf-8")
+    txt = re.sub(r'((?:src|href)="(?:scripts|styles)/[A-Za-z]+\.(?:js|css))(\?v=[0-9.]+)?"', lambda m: m.group(1) + "?v=" + VERSION + '"', txt)
+    f.write_text(txt, encoding="utf-8")
+    print("OK ->", f, "v" + VERSION)
 
 for name, cfg in (("config-mygeotab.json", mygeotab), ("config-drive.json", drive)):
     out = DIST / name

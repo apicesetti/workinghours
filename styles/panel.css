@@ -111,3 +111,6 @@
 #wh-tab-sheets .wh-table td:first-child { white-space: nowrap; }
 .wh-input-sm { width: 100%; min-width: 160px; padding: 4px 6px; font: inherit; }
 .wh-card-danger { border-color: var(--wh-danger); }
+
+/* versión visible (v1.6.1) */
+.wh-ver { font-size: 12px; font-weight: 500; color: var(--wh-muted, #7b8492); background: rgba(127,127,127,.12); border-radius: 10px; padding: 2px 8px; vertical-align: middle; }
