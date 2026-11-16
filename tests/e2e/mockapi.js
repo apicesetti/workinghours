@@ -131,6 +131,12 @@
             if (p.search && p.search.deviceSearch) { ds = ds.filter(function (d) { return d.device.id === p.search.deviceSearch.id; }); }
             return JSON.parse(JSON.stringify(ds));
         }
+        if (method === 'Get' && p.typeName === 'LogRecord') {
+            return (window.__logs || []).filter(function (r) {
+                return (!p.search.deviceSearch || r.device.id === p.search.deviceSearch.id)
+                    && (!p.search.fromDate || r.dateTime >= p.search.fromDate) && (!p.search.toDate || r.dateTime <= p.search.toDate);
+            });
+        }
         if (method === 'Get') { return get(p); }
         if (method === 'Add' && p.typeName === 'AddInData') {
             var e = JSON.parse(JSON.stringify(p.entity)); e.id = 'aD' + (seq++); db.AddInData.push(e); return e.id;

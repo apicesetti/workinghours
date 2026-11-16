@@ -94,10 +94,24 @@ with sync_playwright() as p:
     n = page.evaluate('window.__notifications')
     check(any(x['title'] == 'Viajás con Mauricio Falcon' for x in n), 'se le avisa')
 
+    # 4b) Andrés en ciudad: 7 km/h y la posición del vehículo llega 1 km atrasada; el recorrido (LogRecord) sí lo muestra
+    as_user(page, 'ka@cesetti.com.ar')
+    base = P['lat'] + 0.2
+    for k in range(4):
+        lat = base + 0.0022 * k          # ~245 m cada 2 min ≈ 7 km/h
+        dsi(page, lat - 0.009, P['lon'])  # posición "actual" atrasada ~1 km
+        page.evaluate("([a, lon, iso]) => { window.__logs = [{ device: { id: 'b4' }, dateTime: iso, latitude: a, longitude: lon }]; window.__phone = { lat: a + 0.0003, lon: lon, acc: 12 }; }",
+                      [lat, P['lon'], (now + datetime.timedelta(minutes=2)).astimezone(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')])
+        tick(page, 2)
+    cl = [r for r in recs(page, 'claim') if r['userId'] == 'b57']
+    check(len(cl) == 1 and cl[0].get('auto') and cl[0]['deviceId'] == 'b4', 'detectado en ciudad (lento) con la posición del vehículo atrasada')
+    check('Posición del teléfono' in page.inner_text('#whDrive'), 'muestra la última lectura de posición (%s)' % [l for l in page.inner_text('#whDrive').split(chr(10)) if 'Posición' in l])
+    page.evaluate("() => { window.__logs = []; }")
+
     # 5) Falcon lo ve en su tripulación, marcado como automático
     as_user(page, 'mf@cesetti.com.ar')
     n = page.evaluate('window.__notifications')
-    check(any(x['title'] == 'Braian Coñequeo viaja con vos' for x in n), 'Falcon recibe el aviso')
+    check(any(x['title'] == 'Braian Coñequeo viaja con vos' for x in n) and any(x['title'] == 'Kevin Andrés viaja con vos' for x in n), 'Falcon recibe los avisos')
     card = page.inner_text('.whd-idcard')
     check('Braian Coñequeo · automático' in card and 'Cristian Vargas' in card, 'tripulación con lo automático (%s)' % card.replace(chr(10), ' | ')[:200])
     page.screenshot(path=str(OUT / 'presence_2_chofer.png'), full_page=True)
