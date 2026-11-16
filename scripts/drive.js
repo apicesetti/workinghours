@@ -427,20 +427,41 @@ var factory = function () {
 
     function dsiOf(list) {
         return (list || []).map(function (d) {
-            return { deviceId: S.idOf(d.device), driverId: S.idOf(d.driver), lat: d.latitude, lon: d.longitude, driving: !!d.isDriving };
+            return { deviceId: S.idOf(d.device), driverId: S.idOf(d.driver), lat: d.latitude, lon: d.longitude, driving: !!d.isDriving,
+                t: d.dateTime ? S.toMs(d.dateTime) : 0 };
         }).filter(function (d) { return d.deviceId && d.lat != null; });
     }
     function vehicleNow(deviceId) {
         return call('Get', { typeName: 'DeviceStatusInfo', search: { deviceSearch: { id: deviceId } },
-            propertySelector: { fields: ['device', 'driver', 'latitude', 'longitude', 'isDriving'], isIncluded: true } })
+            propertySelector: { fields: ['device', 'driver', 'latitude', 'longitude', 'isDriving', 'dateTime'], isIncluded: true } })
             .then(function (l) { return dsiOf(l)[0] || null; });
     }
     function fleetNow() {
         if (Date.now() - fleet.at < 60000) { return Promise.resolve(fleet.list); }
         return call('Get', { typeName: 'DeviceStatusInfo', search: {},
-            propertySelector: { fields: ['device', 'driver', 'latitude', 'longitude', 'isDriving'], isIncluded: true } })
+            propertySelector: { fields: ['device', 'driver', 'latitude', 'longitude', 'isDriving', 'dateTime'], isIncluded: true } })
             .then(function (l) { fleet = { at: Date.now(), list: dsiOf(l) }; return fleet.list; });
     }
+
+    /**
+     * Distancia del teléfono al vehículo (v1.6.2). La posición "actual" del vehículo en MyGeotab puede llegar con
+     * uno o dos minutos de atraso: a 60 km/h son 1-2 km. Por eso se compara con el recorrido de los últimos minutos
+     * (LogRecord) y se toma el punto más cercano; si no hay recorrido, con la última posición.
+     */
+    function vehicleDist(pos, v, now) {
+        var best = dist(pos, v);
+        return call('Get', { typeName: 'LogRecord', search: { deviceSearch: { id: v.deviceId },
+            fromDate: new Date(now - 5 * S.MIN).toISOString(), toDate: new Date(now + S.MIN).toISOString() } })
+            .then(function (list) {
+                (list || []).forEach(function (r) {
+                    if (r.latitude == null || r.longitude == null) { return; }
+                    var d = dist(pos, { lat: r.latitude, lon: r.longitude });
+                    if (d < best) { best = d; }
+                });
+                return best;
+            }).catch(function () { return best; });
+    }
+    function diag(o) { o.t = Date.now(); lsSet('presDiag', o); }
 
     /** En qué vehículo estoy ahora según lo cargado: como chofer (tramo abierto) o como acompañante. */
     function myContext() {
@@ -475,22 +496,29 @@ var factory = function () {
         lastPresence = now;
         var ctx = myContext();
         return phonePos().then(function (pos) {
-            if (!pos || pos.acc > 300) { return null; }
+            if (!pos) { diag({ ok: false, why: 'sin ubicación (¿permiso de ubicación para Geotab Drive?)' }); return null; }
+            if (pos.acc > 300) { diag({ ok: false, why: 'ubicación imprecisa (±' + Math.round(pos.acc) + ' m)' }); return null; }
             var prev = lsGet('lastPos', null);
             lsSet('lastPos', { lat: pos.lat, lon: pos.lon, t: now });
-            var kmh = prev && now - prev.t > 30000 && now - prev.t < 15 * S.MIN ? dist(prev, pos) / ((now - prev.t) / 3600000) / 1000 : 0;
+            // cuánto se movió el teléfono desde la lectura anterior (en ciudad se anda a 10 km/h: alcanza con moverse)
+            var moved = prev && now - prev.t > 30000 && now - prev.t < 15 * S.MIN ? dist(prev, pos) : 0;
             if (ctx.deviceId) {
                 return Promise.all([vehicleNow(ctx.deviceId), loadDeviceNames([ctx.deviceId]).catch(function () {})])
-                    .then(function (r) { if (r[0]) { return withVehicle(ctx, pos, r[0], now); } });
+                    .then(function (r) {
+                        if (!r[0]) { diag({ ok: true, acc: pos.acc, why: 'sin posición del vehículo' }); return; }
+                        return vehicleDist(pos, r[0], now).then(function (d) { return withVehicle(ctx, pos, r[0], now, d); });
+                    });
             }
-            if (settings.autoDetect !== false && kmh >= 15) { return detectRide(pos, now); }
+            if (settings.autoDetect !== false && moved >= 100) { return detectRide(pos, now); }
+            diag({ ok: true, acc: pos.acc, why: moved ? 'quieto (se movió ' + Math.round(moved) + ' m)' : 'quieto' });
             lsSet('ride', null);
             return null;
         }).then(function () { return flush(); }).catch(function () { /* se reintenta en la próxima */ });
     }
 
-    function withVehicle(ctx, pos, v, now) {
-        var d = dist(pos, v);
+    function withVehicle(ctx, pos, v, now, d) {
+        if (d == null) { d = dist(pos, v); }
+        diag({ ok: true, acc: pos.acc, deviceId: ctx.deviceId, d: d, role: ctx.role });
         var near = d <= (settings.nearMeters || 250) + Math.min(pos.acc || 0, 100);
         savePresence(ctx.deviceId, near);
         if (near) { lsSet('lastNear', now); }
@@ -524,27 +552,38 @@ var factory = function () {
 
     /** Sin vehículo cargado y el teléfono en movimiento: ¿va con algún vehículo en marcha? */
     function detectRide(pos, now) {
+        fleet.at = 0;   // en movimiento: la flota siempre fresca
         return fleetNow().then(function (list) {
-            var best = null;
-            list.forEach(function (v) {
-                if (!v.driving || !v.driverId || v.driverId === 'UnknownDriverId' || v.driverId === me.id) { return; }
-                var d = dist(pos, v);
-                if (d <= (settings.nearMeters || 250) + Math.min(pos.acc || 0, 100) && (!best || d < best.d)) { best = { v: v, d: d }; }
+            var lim = (settings.nearMeters || 250) + Math.min(pos.acc || 0, 100);
+            // candidatos: vehículos en marcha con chofer a menos de 3 km (la posición puede venir atrasada)
+            var cands = list.filter(function (v) {
+                return v.driving && v.driverId && v.driverId !== 'UnknownDriverId' && v.driverId !== me.id && dist(pos, v) <= 3000;
+            }).sort(function (a, b) { return dist(pos, a) - dist(pos, b); }).slice(0, 3);
+            return Promise.all(cands.map(function (v) { return vehicleDist(pos, v, now); })).then(function (ds) {
+                var best = null;
+                cands.forEach(function (v, i) { if (ds[i] <= lim && (!best || ds[i] < best.d)) { best = { v: v, d: ds[i] }; } });
+                var st = lsGet('ride', null);
+                if (!best) {
+                    diag({ ok: true, acc: pos.acc, why: 'en movimiento, sin vehículo de la flota cerca' + (cands.length ? ' (el más cercano a ' + Math.round(Math.min.apply(null, ds)) + ' m)' : '') });
+                    lsSet('ride', null); return;
+                }
+                if (!st || st.deviceId !== best.v.deviceId) { st = { deviceId: best.v.deviceId, driverId: best.v.driverId, since: now, n: 0 }; }
+                st.n++;
+                lsSet('ride', st);
+                diag({ ok: true, acc: pos.acc, deviceId: best.v.deviceId, d: best.d, role: 'detect', n: st.n });
+                if (st.n < 2) { return; }   // 2 lecturas seguidas juntos y en movimiento (~2-4 min)
+                return sumRide(st);
             });
-            var st = lsGet('ride', null);
-            if (!best) { lsSet('ride', null); return; }
-            if (!st || st.deviceId !== best.v.deviceId) { st = { deviceId: best.v.deviceId, driverId: best.v.driverId, since: now, n: 0 }; }
-            st.n++;
-            lsSet('ride', st);
-            if (st.n < 3) { return; }   // ~3 lecturas seguidas juntos y en movimiento
-            lsSet('ride', null);
-            var drv = operators.filter(function (o) { return o.id === st.driverId; })[0] || { id: st.driverId, name: 'otro chofer' };
-            return loadDeviceNames([st.deviceId]).then(function () {
-                var cl = S.newAutoClaim(me, { id: drv.id, name: drv.name }, { at: st.since, deviceId: st.deviceId, deviceName: devices[st.deviceId] || '', by: 'posición' });
-                saveLocal(cl, 'claim', 'automática');
-                notify('Viajás con ' + drv.name, 'Te sumamos solo como acompañante en ' + (devices[st.deviceId] || 'su vehículo') + ' desde las ' + S.hhmm(st.since)
-                    + '. Si no es así, abrí ' + APP + ' y tocá Deshacer.');
-            });
+        });
+    }
+    function sumRide(st) {
+        lsSet('ride', null);
+        var drv = operators.filter(function (o) { return o.id === st.driverId; })[0] || { id: st.driverId, name: 'otro chofer' };
+        return loadDeviceNames([st.deviceId]).then(function () {
+            var cl = S.newAutoClaim(me, { id: drv.id, name: drv.name }, { at: st.since, deviceId: st.deviceId, deviceName: devices[st.deviceId] || '', by: 'posición' });
+            saveLocal(cl, 'claim', 'automática');
+            notify('Viajás con ' + drv.name, 'Te sumamos solo como acompañante en ' + (devices[st.deviceId] || 'su vehículo') + ' desde las ' + S.hhmm(st.since)
+                + '. Si no es así, abrí ' + APP + ' y tocá Deshacer.');
         });
     }
 
@@ -750,6 +789,21 @@ var factory = function () {
             + (myOpenSegment() ? '' : '<div class="whd-claim"><button class="whd-btn whd-btn-ghost" data-act="claimStart">¿Viajás de acompañante? Viajo con…</button></div>');
     }
 
+    /** Una línea con la última lectura de posición: para saber que la detección está andando. */
+    function renderDiag() {
+        if (!settings.presence) { return ''; }
+        var g = lsGet('presDiag', null);
+        if (!g) { return '<p class="whd-diag">Posición del teléfono: todavía sin lecturas. Dejá Geotab Drive abierto.</p>'; }
+        var txt;
+        if (!g.ok) { txt = g.why; }
+        else if (g.deviceId) {
+            var veh = devices[g.deviceId] || 'el vehículo';
+            txt = 'a ' + (g.d >= 1000 ? (g.d / 1000).toFixed(1).replace('.', ',') + ' km' : Math.round(g.d) + ' m') + ' de ' + veh
+                + (g.role === 'detect' ? ' (viajando juntos, lectura ' + g.n + ' de 2)' : '');
+        } else { txt = g.why || 'sin vehículo'; }
+        return '<p class="whd-diag">Posición del teléfono ' + S.hhmm(g.t) + ': ' + esc(txt) + (g.acc ? ' · ±' + Math.round(g.acc) + ' m' : '') + '</p>';
+    }
+
     function renderHome() {
         var day = today();
         var list = jornadas.slice().sort(function (a, b) { return b.firstAt - a.firstAt; });
@@ -759,7 +813,7 @@ var factory = function () {
             return asks + rides + renderMyClaims() + (rides ? '' : '<div class="whd-empty"><p><b>Sin identificaciones hoy.</b></p>'
                 + '<p>Cuando pases el llavero o la cámara te identifique en un vehículo, te vamos a avisar para que cargues quién viaja con vos. '
                 + 'Si viajás de acompañante, se registra solo por la posición de tu teléfono.</p></div>')
-                + claimButton();
+                + claimButton() + renderDiag();
         }
         return asks + renderIdentifications() + rides + list.map(function (j) {
             var rec = records[j.key];
@@ -776,7 +830,7 @@ var factory = function () {
                 + (window.CESETTI_SHELL ? '' : '<button class="whd-btn whd-btn-ghost" data-act="stops" data-key="' + esc(j.key) + '">Paradas y clientes</button>')
                 + '<button class="whd-btn whd-btn-ghost" data-act="sheet" data-key="' + esc(j.key) + '">Planilla</button>'
                 + '</div></article>';
-        }).join('') + renderMyClaims() + claimButton();
+        }).join('') + renderMyClaims() + claimButton() + renderDiag();
     }
 
     // ------------------------------------------------------------------
@@ -1670,6 +1724,14 @@ var factory = function () {
             render();
             startLoop();
             refresh(true);
+            // al abrir la pestaña: una lectura de posición ya (sin esperar el ciclo de 2 min)
+            var gen = window.__whdFocusGen = (window.__whdFocusGen || 0) + 1;
+            if (settings.presence && Date.now() - lastPresence > 30000) {
+                setTimeout(function () {
+                    if (gen !== window.__whdFocusGen) { return; }   // se volvió a abrir (otra sesión): esa manda
+                    presenceTick(true).then(function () { if (gen === window.__whdFocusGen && root && view.name === 'home') { render(); } });
+                }, 1500);
+            }
         },
         blur: function () { /* el ciclo de revisión sigue corriendo */ },
         /** onShutdown: último intento de sincronizar (Drive da 15 s). */
