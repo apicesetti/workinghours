@@ -444,22 +444,28 @@ var factory = function () {
     }
 
     /**
-     * Distancia del teléfono al vehículo (v1.6.2). La posición "actual" del vehículo en MyGeotab puede llegar con
-     * uno o dos minutos de atraso: a 60 km/h son 1-2 km. Por eso se compara con el recorrido de los últimos minutos
-     * (LogRecord) y se toma el punto más cercano; si no hay recorrido, con la última posición.
+     * Dónde estaba el vehículo en el momento de la lectura del teléfono (v1.6.3).
+     * La posición "actual" de MyGeotab puede llegar 1-2 min atrasada (a 60 km/h, 1-2 km): se busca en el
+     * recorrido (LogRecord) el punto más cercano EN EL TIEMPO, no en distancia; comparar contra todo el recorrido
+     * daba falsos positivos (un vehículo que entra a la base "pasa cerca" de un teléfono que está quieto ahí).
+     * Sin un punto a menos de 90 s de la lectura, se usa la posición actual solo si es reciente; si no, null.
      */
-    function vehicleDist(pos, v, now) {
-        var best = dist(pos, v);
+    function vehiclePosAt(v, t) {
+        var fallback = v.t && Math.abs(v.t - t) <= 90000 ? { lat: v.lat, lon: v.lon } : (!v.driving ? { lat: v.lat, lon: v.lon } : null);
         return call('Get', { typeName: 'LogRecord', search: { deviceSearch: { id: v.deviceId },
-            fromDate: new Date(now - 5 * S.MIN).toISOString(), toDate: new Date(now + S.MIN).toISOString() } })
+            fromDate: new Date(t - 4 * S.MIN).toISOString(), toDate: new Date(t + S.MIN).toISOString() } })
             .then(function (list) {
+                var best = null;
                 (list || []).forEach(function (r) {
-                    if (r.latitude == null || r.longitude == null) { return; }
-                    var d = dist(pos, { lat: r.latitude, lon: r.longitude });
-                    if (d < best) { best = d; }
+                    if (r.latitude == null || r.longitude == null || !r.dateTime) { return; }
+                    var dt = Math.abs(S.toMs(r.dateTime) - t);
+                    if (dt <= 90000 && (!best || dt < best.dt)) { best = { lat: r.latitude, lon: r.longitude, dt: dt }; }
                 });
-                return best;
-            }).catch(function () { return best; });
+                return best || fallback;
+            }).catch(function () { return fallback; });
+    }
+    function vehicleDist(pos, v, now) {
+        return vehiclePosAt(v, now).then(function (vp) { return vp ? dist(pos, vp) : dist(pos, v); });
     }
     function diag(o) { o.t = Date.now(); lsSet('presDiag', o); }
 
@@ -499,7 +505,9 @@ var factory = function () {
             if (!pos) { diag({ ok: false, why: 'sin ubicación (¿permiso de ubicación para Geotab Drive?)' }); return null; }
             if (pos.acc > 300) { diag({ ok: false, why: 'ubicación imprecisa (±' + Math.round(pos.acc) + ' m)' }); return null; }
             var prev = lsGet('lastPos', null);
-            lsSet('lastPos', { lat: pos.lat, lon: pos.lon, t: now });
+            // dos lecturas casi juntas (al abrir la pestaña justo después del ciclo): la de referencia no se pisa
+            var tooSoon = prev && now - prev.t >= 0 && now - prev.t < 30000;
+            if (!tooSoon) { lsSet('lastPos', { lat: pos.lat, lon: pos.lon, t: now, acc: pos.acc }); }
             // cuánto se movió el teléfono desde la lectura anterior (en ciudad se anda a 10 km/h: alcanza con moverse)
             var moved = prev && now - prev.t > 30000 && now - prev.t < 15 * S.MIN ? dist(prev, pos) : 0;
             if (ctx.deviceId) {
@@ -509,7 +517,10 @@ var factory = function () {
                         return vehicleDist(pos, r[0], now).then(function (d) { return withVehicle(ctx, pos, r[0], now, d); });
                     });
             }
-            if (settings.autoDetect !== false && moved >= 100) { return detectRide(pos, now); }
+            // detectar: el teléfono se movió de verdad (más que el error del GPS: adentro de un edificio "salta")
+            var jitter = 2 * ((pos.acc || 0) + ((prev && prev.acc) || 0));
+            if (settings.autoDetect !== false && pos.acc <= 50 && moved >= Math.max(150, jitter)) { return detectRide(pos, now); }
+            if (tooSoon) { return null; }
             diag({ ok: true, acc: pos.acc, why: moved ? 'quieto (se movió ' + Math.round(moved) + ' m)' : 'quieto' });
             lsSet('ride', null);
             return null;
@@ -554,24 +565,35 @@ var factory = function () {
     function detectRide(pos, now) {
         fleet.at = 0;   // en movimiento: la flota siempre fresca
         return fleetNow().then(function (list) {
-            var lim = (settings.nearMeters || 250) + Math.min(pos.acc || 0, 100);
+            var lim = (settings.nearMeters || 250) + Math.min(pos.acc || 0, 50);
             // candidatos: vehículos en marcha con chofer a menos de 3 km (la posición puede venir atrasada)
             var cands = list.filter(function (v) {
                 return v.driving && v.driverId && v.driverId !== 'UnknownDriverId' && v.driverId !== me.id && dist(pos, v) <= 3000;
             }).sort(function (a, b) { return dist(pos, a) - dist(pos, b); }).slice(0, 3);
-            return Promise.all(cands.map(function (v) { return vehicleDist(pos, v, now); })).then(function (ds) {
+            return Promise.all(cands.map(function (v) { return vehiclePosAt(v, now); })).then(function (vps) {
                 var best = null;
-                cands.forEach(function (v, i) { if (ds[i] <= lim && (!best || ds[i] < best.d)) { best = { v: v, d: ds[i] }; } });
+                cands.forEach(function (v, i) {
+                    if (!vps[i]) { return; }
+                    var d = dist(pos, vps[i]);
+                    if (d <= lim && (!best || d < best.d)) { best = { v: v, vp: vps[i], d: d }; }
+                });
                 var st = lsGet('ride', null);
                 if (!best) {
-                    diag({ ok: true, acc: pos.acc, why: 'en movimiento, sin vehículo de la flota cerca' + (cands.length ? ' (el más cercano a ' + Math.round(Math.min.apply(null, ds)) + ' m)' : '') });
+                    diag({ ok: true, acc: pos.acc, why: 'en movimiento, sin vehículo de la flota al lado' });
                     lsSet('ride', null); return;
                 }
+                // viajar juntos = los dos se movieron desde la lectura anterior, y lo mismo
+                var together = false;
+                if (st && st.deviceId === best.v.deviceId && st.phone && st.veh) {
+                    var mp = dist(st.phone, pos), mv = dist(st.veh, best.vp);
+                    together = mp >= 150 && mv >= 150 && Math.abs(mp - mv) <= Math.max(200, 0.5 * mv);
+                }
                 if (!st || st.deviceId !== best.v.deviceId) { st = { deviceId: best.v.deviceId, driverId: best.v.driverId, since: now, n: 0 }; }
-                st.n++;
+                if (together) { st.n++; }
+                st.phone = { lat: pos.lat, lon: pos.lon }; st.veh = { lat: best.vp.lat, lon: best.vp.lon };
                 lsSet('ride', st);
                 diag({ ok: true, acc: pos.acc, deviceId: best.v.deviceId, d: best.d, role: 'detect', n: st.n });
-                if (st.n < 2) { return; }   // 2 lecturas seguidas juntos y en movimiento (~2-4 min)
+                if (st.n < 2) { return; }   // 3 lecturas: 2 tramos recorridos juntos (~4-6 min)
                 return sumRide(st);
             });
         });
@@ -799,7 +821,7 @@ var factory = function () {
         else if (g.deviceId) {
             var veh = devices[g.deviceId] || 'el vehículo';
             txt = 'a ' + (g.d >= 1000 ? (g.d / 1000).toFixed(1).replace('.', ',') + ' km' : Math.round(g.d) + ' m') + ' de ' + veh
-                + (g.role === 'detect' ? ' (viajando juntos, lectura ' + g.n + ' de 2)' : '');
+                + (g.role === 'detect' ? ' (viajando juntos, ' + g.n + ' de 2)' : '');
         } else { txt = g.why || 'sin vehículo'; }
         return '<p class="whd-diag">Posición del teléfono ' + S.hhmm(g.t) + ': ' + esc(txt) + (g.acc ? ' · ±' + Math.round(g.acc) + ' m' : '') + '</p>';
     }
