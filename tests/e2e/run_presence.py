@@ -32,8 +32,13 @@ def tick(page, minutes=0):
 def recs(page, typ):
     return [e['details']['rec'] for e in page.evaluate('window.__db.AddInData') if e['details']['type'] == typ]
 
-def dsi(page, lat, lon, driving=True):
-    page.evaluate("([a, b, d]) => { window.__dsi = [{ device: { id: 'b4' }, driver: { id: 'b43F' }, latitude: a, longitude: b, isDriving: d }]; }", [lat, lon, driving])
+def utc(t):
+    return t.astimezone(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+
+def dsi(page, lat, lon, driving=True, minutes_ahead=0):
+    # dateTime = el momento de la próxima lectura (tick avanza el reloj antes de leer)
+    page.evaluate("([a, b, d, t]) => { window.__dsi = [{ device: { id: 'b4' }, driver: { id: 'b43F' }, latitude: a, longitude: b, isDriving: d, dateTime: t }]; }",
+                  [lat, lon, driving, utc(now + datetime.timedelta(minutes=minutes_ahead))])
 
 with sync_playwright() as p:
     b = p.chromium.launch()
@@ -86,7 +91,7 @@ with sync_playwright() as p:
     as_user(page, 'bnc@cesetti.com.ar')
     for k in range(4):
         lat = P['lat'] + 0.01 * k
-        dsi(page, lat, P['lon'])
+        dsi(page, lat, P['lon'], minutes_ahead=2)
         page.evaluate("(a) => { window.__phone = { lat: a + 0.0004, lon: %s, acc: 10 }; }" % P['lon'], lat)
         tick(page, 2)
     cl = recs(page, 'claim')
@@ -99,13 +104,29 @@ with sync_playwright() as p:
     base = P['lat'] + 0.2
     for k in range(4):
         lat = base + 0.0022 * k          # ~245 m cada 2 min ≈ 7 km/h
-        dsi(page, lat - 0.009, P['lon'])  # posición "actual" atrasada ~1 km
+        dsi(page, lat - 0.009, P['lon'], minutes_ahead=-1)  # posición "actual" atrasada ~1 km y de hace 3 min
         page.evaluate("([a, lon, iso]) => { window.__logs = [{ device: { id: 'b4' }, dateTime: iso, latitude: a, longitude: lon }]; window.__phone = { lat: a + 0.0003, lon: lon, acc: 12 }; }",
                       [lat, P['lon'], (now + datetime.timedelta(minutes=2)).astimezone(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')])
         tick(page, 2)
     cl = [r for r in recs(page, 'claim') if r['userId'] == 'b57']
     check(len(cl) == 1 and cl[0].get('auto') and cl[0]['deviceId'] == 'b4', 'detectado en ciudad (lento) con la posición del vehículo atrasada')
     check('Posición del teléfono' in page.inner_text('#whDrive'), 'muestra la última lectura de posición (%s)' % [l for l in page.inner_text('#whDrive').split(chr(10)) if 'Posición' in l])
+    page.evaluate("() => { window.__logs = []; }")
+
+    # 4c) falso positivo (caso real 17/11): Jara quieto en la base, el GPS salta adentro del edificio,
+    #     y el vehículo de Falcon entra a la base y estaciona
+    as_user(page, 'mc@cesetti.com.ar')
+    base = (P['lat'] + 0.5, P['lon'])
+    approach = [0.012, 0.006, 0.002, 0.0, 0.0, 0.0]   # km→ grados al norte de la base
+    for k, off in enumerate(approach):
+        vlat = base[0] + off
+        dsi(page, vlat, base[1], driving=off > 0 or k == 3, minutes_ahead=2)
+        page.evaluate("([a, lon, iso]) => { window.__logs = [{ device: { id: 'b4' }, dateTime: iso, latitude: a, longitude: lon }]; }",
+                      [vlat, base[1], utc(now + datetime.timedelta(minutes=2))])
+        j = 0.0016 if k % 2 else -0.0016           # salta ±180 m
+        page.evaluate("([a, lon]) => { window.__phone = { lat: a, lon: lon, acc: 35 }; }", [base[0] + j, base[1]])
+        tick(page, 2)
+    check(not [r for r in recs(page, 'claim') if r['userId'] == 'b7E'], 'quieto en la base: NO se lo suma aunque el vehículo entre y el GPS salte')
     page.evaluate("() => { window.__logs = []; }")
 
     # 5) Falcon lo ve en su tripulación, marcado como automático
@@ -138,3 +159,4 @@ with sync_playwright() as p:
 if errors:
     print('\n'.join(errors)); sys.exit(1)
 print('TODO OK')
+
